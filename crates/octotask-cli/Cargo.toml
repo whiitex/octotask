@@ -1,0 +1,19 @@
+[package]
+name = "octotask"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+clap = { version = "4.6.7", features = ["derive"] }
+serde_json = "1.0.154"
+octotask-core = { version = "0.1.0", path = "../octotask-core" }
+
+[dev-dependencies]
+assert_cmd = "2.2.2"
+predicates = "3.1.4"
+tempfile = "3.27.0"
+
+[[bin]]
+name = "octok"
+path = "src/main.rs"
