@@ -123,17 +123,16 @@ fn project(registry: &Registry, cmd: ProjectCommand) -> Result<()> {
 }
 
 fn repo(registry: &Registry, project_name: &str, cmd: RepoCommand) -> Result<()> {
-    let mut project = registry.load_project(project_name)?;
     match cmd {
         RepoCommand::Add { url, name, base } => {
-            let key = project.add_repo(&url, name.as_deref(), base.as_deref())?;
-            registry.save_project(&project)?;
+            let key = registry.update_project(project_name, |project| {
+                project.add_repo(&url, name.as_deref(), base.as_deref())
+            })?;
             println!("added `{key}` to {project_name}: {url}");
         }
-        RepoCommand::Ls { json } => print_repos(&project, json),
+        RepoCommand::Ls { json } => print_repos(&registry.load_project(project_name)?, json),
         RepoCommand::Rm { key } => {
-            project.remove_repo(&key)?;
-            registry.save_project(&project)?;
+            registry.update_project(project_name, |project| project.remove_repo(&key))?;
             println!("removed `{key}` from {project_name}");
         }
     }

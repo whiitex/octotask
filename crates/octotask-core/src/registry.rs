@@ -1,14 +1,17 @@
-use std::fs;
+use std::fs::{self, File};
 use std::io::ErrorKind;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
 use crate::project::validate_ident;
-use crate::utils::{CONFIG_VERSION, parse_versioned, to_yaml, write_atomic, write_new};
+use crate::utils::{
+    CONFIG_VERSION, lock_exclusive, parse_versioned, to_yaml, write_atomic, write_new,
+};
 use crate::{Error, Home, Project, Result};
 
 /// Reads and writes project files and the global config under a [`Home`].
+/// Every write holds one lock for the whole home; reads skip it because writes are atomic renames.
 #[derive(Debug, Clone)]
 pub struct Registry {
     home: Home,
@@ -26,6 +29,7 @@ impl Registry {
     /// Creates a new project file and makes it the default.
     pub fn init_project(&self, name: &str, base: &str) -> Result<Project> {
         let project = Project::new(name, base)?;
+        let _lock = self.lock()?;
         // Read first: an unreadable global config must fail before anything is written.
         self.load_global()?;
         let path = self.home.project_file(name);
@@ -35,12 +39,13 @@ impl Registry {
             }
             other => other,
         })?;
-        self.set_default_project(name)?;
+        self.save_default_project(name)?;
         Ok(project)
     }
 
     /// Deletes the project file, clearing the default if it pointed to this project.
     pub fn remove_project(&self, name: &str) -> Result<()> {
+        let _lock = self.lock()?;
         self.ensure_exists(name)?;
         let mut config = self.load_global()?;
         // Clear first: a crash in between must not leave a default pointing at nothing.
@@ -62,10 +67,17 @@ impl Registry {
         Ok(project)
     }
 
-    pub fn save_project(&self, project: &Project) -> Result<()> {
-        project.validate()?;
-        let path = self.home.project_file(&project.name);
-        write_atomic(&path, &to_yaml(project, &path)?)
+    /// Applies `change` to the stored project, saving it only if the change succeeds.
+    pub fn update_project<T>(
+        &self,
+        name: &str,
+        change: impl FnOnce(&mut Project) -> Result<T>,
+    ) -> Result<T> {
+        let _lock = self.lock()?;
+        let mut project = self.load_project(name)?;
+        let output = change(&mut project)?;
+        self.save_project(&project)?;
+        Ok(output)
     }
 
     pub fn list_projects(&self) -> Result<Vec<String>> {
@@ -99,10 +111,9 @@ impl Registry {
     }
 
     pub fn set_default_project(&self, name: &str) -> Result<()> {
+        let _lock = self.lock()?;
         self.ensure_exists(name)?;
-        let mut config = self.load_global()?;
-        config.default_project = Some(name.to_string());
-        self.save_global(&config)
+        self.save_default_project(name)
     }
 
     pub fn resolve_project(&self, explicit: Option<&str>) -> Result<String> {
@@ -112,6 +123,22 @@ impl Registry {
         };
         self.ensure_exists(&name)?;
         Ok(name)
+    }
+
+    fn lock(&self) -> Result<File> {
+        lock_exclusive(&self.home.registry_lock_file())
+    }
+
+    fn save_default_project(&self, name: &str) -> Result<()> {
+        let mut config = self.load_global()?;
+        config.default_project = Some(name.to_string());
+        self.save_global(&config)
+    }
+
+    fn save_project(&self, project: &Project) -> Result<()> {
+        project.validate()?;
+        let path = self.home.project_file(&project.name);
+        write_atomic(&path, &to_yaml(project, &path)?)
     }
 
     fn ensure_exists(&self, name: &str) -> Result<()> {

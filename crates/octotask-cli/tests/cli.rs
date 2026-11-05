@@ -1,5 +1,5 @@
 use std::fs;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use assert_cmd::prelude::*;
 use predicates::prelude::*;
@@ -31,6 +31,19 @@ impl Env {
         );
         serde_json::from_slice(&out.stdout).unwrap()
     }
+
+    fn read(&self, relative_path: &str) -> String {
+        fs::read_to_string(self.dir.path().join(relative_path)).unwrap()
+    }
+
+    fn project_dir_entries(&self) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(self.dir.path().join("projects"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        names
+    }
 }
 
 #[test]
@@ -58,6 +71,7 @@ fn registered_repos_are_persisted_in_project_file() {
     assert!(raw.contains("git@github.com:org/frontend.git"), "{raw}");
 
     let ls = env.json(&["repo", "ls", "--json"]);
+    assert_eq!(ls["schema"], 1);
     assert_eq!(ls["project"], "deeptree");
     assert_eq!(
         ls["repos"],
@@ -133,6 +147,9 @@ fn project_rm_of_another_project_keeps_the_default() {
     let ls = env.json(&["project", "ls", "--json"]);
     assert_eq!(ls["projects"], serde_json::json!(["side"]));
     assert_eq!(ls["default"], "side");
+
+    assert_eq!(env.project_dir_entries(), ["side.yaml"]);
+    assert!(env.read("config.yaml").contains("default_project: side"));
 }
 
 #[test]
@@ -154,6 +171,9 @@ fn project_rm_of_the_default_leaves_no_default() {
     let ls = env.json(&["project", "ls", "--json"]);
     assert_eq!(ls["projects"], serde_json::json!(["deeptree"]));
     assert_eq!(ls["default"], serde_json::Value::Null);
+    assert_eq!(env.project_dir_entries(), ["deeptree.yaml"]);
+    assert!(!env.read("config.yaml").contains("default_project"));
+
     env.octok(&["repo", "ls"])
         .assert()
         .code(1)
@@ -170,6 +190,7 @@ fn project_ls_reports_default() {
     env.octok(&["project", "init", "zeta"]).assert().success();
     env.octok(&["project", "init", "alpha"]).assert().success();
     let ls = env.json(&["project", "ls", "--json"]);
+    assert_eq!(ls["schema"], 1);
     assert_eq!(ls["projects"], serde_json::json!(["alpha", "zeta"]));
     assert_eq!(ls["default"], "alpha");
 }
@@ -228,15 +249,95 @@ fn repo_rm_removes_from_file() {
     env.octok(&["repo", "add", "git@github.com:org/frontend.git"])
         .assert()
         .success();
+    env.octok(&["repo", "add", "git@github.com:org/backend.git"])
+        .assert()
+        .success();
+
     env.octok(&["repo", "rm", "frontend"]).assert().success();
+
     assert_eq!(
         env.json(&["repo", "ls", "--json"])["repos"],
-        serde_json::json!([])
+        serde_json::json!([
+            {"key": "backend", "url": "git@github.com:org/backend.git", "base": "main"},
+        ])
     );
+    let after_rm = env.read("projects/deeptree.yaml");
+    assert!(!after_rm.contains("frontend"), "{after_rm}");
+    assert!(
+        after_rm.contains("git@github.com:org/backend.git"),
+        "{after_rm}"
+    );
+
     env.octok(&["repo", "rm", "frontend"])
         .assert()
         .code(1)
         .stderr(predicate::str::contains("frontend"));
+    assert_eq!(env.read("projects/deeptree.yaml"), after_rm);
+}
+
+#[test]
+fn concurrent_repo_adds_are_all_saved() {
+    const REPOS: usize = 24;
+    let env = Env::new();
+    env.octok(&["project", "init", "deeptree"])
+        .assert()
+        .success();
+
+    let children: Vec<_> = (0..REPOS)
+        .map(|i| {
+            env.octok(&["repo", "add", &format!("git@github.com:org/repo{i}.git")])
+                .stdout(Stdio::null())
+                .spawn()
+                .unwrap()
+        })
+        .collect();
+    for mut child in children {
+        assert!(child.wait().unwrap().success());
+    }
+
+    let ls = env.json(&["repo", "ls", "--json"]);
+    assert_eq!(ls["repos"].as_array().unwrap().len(), REPOS);
+}
+
+#[test]
+fn repo_add_with_name_accepts_url_whose_last_segment_is_not_a_valid_key() {
+    let env = Env::new();
+    env.octok(&["project", "init", "deeptree"])
+        .assert()
+        .success();
+    env.octok(&[
+        "repo",
+        "add",
+        "git@github.com:org/.github.git",
+        "--name",
+        "dotgithub",
+    ])
+    .assert()
+    .success();
+
+    assert_eq!(
+        env.json(&["repo", "ls", "--json"])["repos"],
+        serde_json::json!([
+            {"key": "dotgithub", "url": "git@github.com:org/.github.git", "base": "main"},
+        ])
+    );
+}
+
+#[test]
+fn repo_add_without_name_asks_for_one_when_no_key_can_be_derived() {
+    let env = Env::new();
+    env.octok(&["project", "init", "deeptree"])
+        .assert()
+        .success();
+    let before = env.read("projects/deeptree.yaml");
+
+    env.octok(&["repo", "add", "git@github.com:org/.github.git"])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("--name"))
+        .stderr(predicate::str::contains("invalid git url").not());
+
+    assert_eq!(env.read("projects/deeptree.yaml"), before);
 }
 
 #[test]
