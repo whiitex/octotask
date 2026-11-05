@@ -62,12 +62,73 @@ fn init_twice_fails_and_keeps_existing_file() {
 }
 
 #[test]
-fn first_project_becomes_default_and_later_ones_do_not() {
+fn init_makes_the_new_project_the_default() {
     let (_dir, reg) = registry();
     assert_eq!(reg.default_project().unwrap(), None);
     reg.init_project("deeptree", "develop").unwrap();
-    reg.init_project("side", "main").unwrap();
     assert_eq!(reg.default_project().unwrap().as_deref(), Some("deeptree"));
+    reg.init_project("side", "main").unwrap();
+    assert_eq!(reg.default_project().unwrap().as_deref(), Some("side"));
+}
+
+#[test]
+fn failed_init_keeps_the_current_default() {
+    let (_dir, reg) = registry();
+    reg.init_project("deeptree", "develop").unwrap();
+    reg.init_project("side", "main").unwrap();
+    assert!(reg.init_project("deeptree", "main").is_err());
+    assert_eq!(reg.default_project().unwrap().as_deref(), Some("side"));
+}
+
+#[test]
+fn remove_deletes_project_and_keeps_default_of_another_project() {
+    let (_dir, reg) = registry();
+    reg.init_project("deeptree", "develop").unwrap();
+    reg.init_project("side", "main").unwrap();
+    reg.remove_project("deeptree").unwrap();
+    assert_eq!(reg.list_projects().unwrap(), ["side"]);
+    assert_eq!(reg.default_project().unwrap().as_deref(), Some("side"));
+}
+
+#[test]
+fn remove_clears_default_when_it_pointed_to_the_removed_project() {
+    let (_dir, reg) = registry();
+    reg.init_project("deeptree", "develop").unwrap();
+    reg.init_project("side", "main").unwrap();
+    reg.remove_project("side").unwrap();
+    assert_eq!(reg.list_projects().unwrap(), ["deeptree"]);
+    assert_eq!(reg.default_project().unwrap(), None);
+    assert!(matches!(
+        reg.resolve_project(None),
+        Err(Error::NoDefaultProject)
+    ));
+}
+
+#[test]
+fn remove_missing_project_is_not_found() {
+    let (_dir, reg) = registry();
+    assert!(matches!(reg.remove_project("nope"), Err(Error::ProjectNotFound(n)) if n == "nope"));
+}
+
+#[test]
+fn remove_rejects_name_escaping_the_projects_dir() {
+    let (dir, reg) = registry();
+    reg.init_project("deeptree", "develop").unwrap();
+    assert!(matches!(
+        reg.remove_project("../config"),
+        Err(Error::InvalidName { .. })
+    ));
+    assert!(dir.path().join("octotask-home/config.yaml").exists());
+}
+
+#[test]
+fn remove_works_on_an_unparseable_project_file() {
+    let (dir, reg) = registry();
+    reg.init_project("deeptree", "develop").unwrap();
+    let path = dir.path().join("octotask-home/projects/deeptree.yaml");
+    fs::write(&path, "not: [valid").unwrap();
+    reg.remove_project("deeptree").unwrap();
+    assert!(!path.exists());
 }
 
 #[test]
@@ -85,12 +146,12 @@ fn set_default_requires_existing_project() {
     let (_dir, reg) = registry();
     reg.init_project("deeptree", "develop").unwrap();
     reg.init_project("side", "main").unwrap();
-    reg.set_default_project("side").unwrap();
-    assert_eq!(reg.default_project().unwrap().as_deref(), Some("side"));
+    reg.set_default_project("deeptree").unwrap();
+    assert_eq!(reg.default_project().unwrap().as_deref(), Some("deeptree"));
     assert!(
         matches!(reg.set_default_project("nope"), Err(Error::ProjectNotFound(n)) if n == "nope")
     );
-    assert_eq!(reg.default_project().unwrap().as_deref(), Some("side"));
+    assert_eq!(reg.default_project().unwrap().as_deref(), Some("deeptree"));
 }
 
 #[test]
@@ -102,8 +163,8 @@ fn resolve_prefers_explicit_then_default() {
     ));
     reg.init_project("deeptree", "develop").unwrap();
     reg.init_project("side", "main").unwrap();
-    assert_eq!(reg.resolve_project(None).unwrap(), "deeptree");
-    assert_eq!(reg.resolve_project(Some("side")).unwrap(), "side");
+    assert_eq!(reg.resolve_project(None).unwrap(), "side");
+    assert_eq!(reg.resolve_project(Some("deeptree")).unwrap(), "deeptree");
     assert!(matches!(
         reg.resolve_project(Some("nope")),
         Err(Error::ProjectNotFound(_))

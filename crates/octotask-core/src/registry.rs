@@ -23,11 +23,11 @@ impl Registry {
         &self.home
     }
 
-    /// Creates a new project file. The first project becomes the default.
+    /// Creates a new project file and makes it the default.
     pub fn init_project(&self, name: &str, base: &str) -> Result<Project> {
         let project = Project::new(name, base)?;
         // Read first: an unreadable global config must fail before anything is written.
-        let is_first_project = self.default_project()?.is_none();
+        self.load_global()?;
         let path = self.home.project_file(name);
         write_new(&path, &to_yaml(&project, &path)?).map_err(|e| match e {
             Error::Io { source, .. } if source.kind() == ErrorKind::AlreadyExists => {
@@ -35,10 +35,21 @@ impl Registry {
             }
             other => other,
         })?;
-        if is_first_project {
-            self.set_default_project(name)?;
-        }
+        self.set_default_project(name)?;
         Ok(project)
+    }
+
+    /// Deletes the project file, clearing the default if it pointed to this project.
+    pub fn remove_project(&self, name: &str) -> Result<()> {
+        self.ensure_exists(name)?;
+        let mut config = self.load_global()?;
+        // Clear first: a crash in between must not leave a default pointing at nothing.
+        if config.default_project.as_deref() == Some(name) {
+            config.default_project = None;
+            self.save_global(&config)?;
+        }
+        let path = self.home.project_file(name);
+        fs::remove_file(&path).map_err(|source| Error::Io { path, source })
     }
 
     pub fn load_project(&self, name: &str) -> Result<Project> {
@@ -91,8 +102,7 @@ impl Registry {
         self.ensure_exists(name)?;
         let mut config = self.load_global()?;
         config.default_project = Some(name.to_string());
-        let path = self.home.global_config_file();
-        write_atomic(&path, &to_yaml(&config, &path)?)
+        self.save_global(&config)
     }
 
     pub fn resolve_project(&self, explicit: Option<&str>) -> Result<String> {
@@ -120,6 +130,11 @@ impl Registry {
             Err(e) if e.kind() == ErrorKind::NotFound => Ok(GlobalConfig::default()),
             Err(source) => Err(Error::Io { path, source }),
         }
+    }
+
+    fn save_global(&self, config: &GlobalConfig) -> Result<()> {
+        let path = self.home.global_config_file();
+        write_atomic(&path, &to_yaml(config, &path)?)
     }
 }
 

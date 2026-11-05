@@ -75,24 +75,93 @@ fn repo_commands_target_default_project_unless_overridden() {
         .assert()
         .success();
     env.octok(&["project", "init", "side"]).assert().success();
-    env.octok(&["repo", "add", "git@github.com:org/frontend.git"])
+    env.octok(&["repo", "add", "git@github.com:org/tool.git"])
         .assert()
         .success();
-    env.octok(&["-p", "side", "repo", "add", "git@github.com:org/tool.git"])
-        .assert()
-        .success();
+    env.octok(&[
+        "-p",
+        "deeptree",
+        "repo",
+        "add",
+        "git@github.com:org/frontend.git",
+    ])
+    .assert()
+    .success();
 
     assert_eq!(
         env.json(&["repo", "ls", "--json"])["repos"][0]["key"],
-        "frontend"
-    );
-    assert_eq!(
-        env.json(&["repo", "ls", "-p", "side", "--json"])["repos"][0]["key"],
         "tool"
     );
+    assert_eq!(
+        env.json(&["repo", "ls", "-p", "deeptree", "--json"])["repos"][0]["key"],
+        "frontend"
+    );
 
-    env.octok(&["project", "use", "side"]).assert().success();
-    assert_eq!(env.json(&["repo", "ls", "--json"])["project"], "side");
+    env.octok(&["project", "use", "deeptree"])
+        .assert()
+        .success();
+    assert_eq!(env.json(&["repo", "ls", "--json"])["project"], "deeptree");
+}
+
+#[test]
+fn project_init_announces_the_new_default() {
+    let env = Env::new();
+    env.octok(&["project", "init", "deeptree"])
+        .assert()
+        .success();
+    env.octok(&["project", "init", "side"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "`side` is now the default project\n",
+        ));
+}
+
+#[test]
+fn project_rm_of_another_project_keeps_the_default() {
+    let env = Env::new();
+    env.octok(&["project", "init", "deeptree"])
+        .assert()
+        .success();
+    env.octok(&["project", "init", "side"]).assert().success();
+
+    env.octok(&["project", "rm", "deeptree"])
+        .assert()
+        .success()
+        .stdout("removed project `deeptree`\n");
+
+    let ls = env.json(&["project", "ls", "--json"]);
+    assert_eq!(ls["projects"], serde_json::json!(["side"]));
+    assert_eq!(ls["default"], "side");
+}
+
+#[test]
+fn project_rm_of_the_default_leaves_no_default() {
+    let env = Env::new();
+    env.octok(&["project", "init", "deeptree"])
+        .assert()
+        .success();
+    env.octok(&["project", "init", "side"]).assert().success();
+
+    env.octok(&["project", "rm", "side"])
+        .assert()
+        .success()
+        .stdout(
+            "removed project `side`\n\
+             no default project: choose one with `octok project use <name>`\n",
+        );
+
+    let ls = env.json(&["project", "ls", "--json"]);
+    assert_eq!(ls["projects"], serde_json::json!(["deeptree"]));
+    assert_eq!(ls["default"], serde_json::Value::Null);
+    env.octok(&["repo", "ls"])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("default project"));
+    env.octok(&["project", "rm", "side"])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("project `side` not found"));
 }
 
 #[test]
@@ -102,7 +171,7 @@ fn project_ls_reports_default() {
     env.octok(&["project", "init", "alpha"]).assert().success();
     let ls = env.json(&["project", "ls", "--json"]);
     assert_eq!(ls["projects"], serde_json::json!(["alpha", "zeta"]));
-    assert_eq!(ls["default"], "zeta");
+    assert_eq!(ls["default"], "alpha");
 }
 
 #[test]
@@ -118,7 +187,7 @@ fn project_ls_text_marks_default() {
     env.octok(&["project", "ls"])
         .assert()
         .success()
-        .stdout("  alpha\n* zeta\n");
+        .stdout("* alpha\n  zeta\n");
 }
 
 #[test]

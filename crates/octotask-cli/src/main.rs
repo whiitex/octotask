@@ -31,7 +31,7 @@ enum Command {
 
 #[derive(Subcommand)]
 enum ProjectCommand {
-    /// Create a new project; the first one becomes the default
+    /// Create a new project and make it the default
     Init {
         name: String,
         /// Default base branch for the project's repos
@@ -45,6 +45,8 @@ enum ProjectCommand {
     },
     /// Set the default project
     Use { name: String },
+    /// Delete a project and its list of repos
+    Rm { name: String },
 }
 
 #[derive(Subcommand)]
@@ -98,9 +100,7 @@ fn project(registry: &Registry, cmd: ProjectCommand) -> Result<()> {
                 "created project `{name}` (base: {base}) at {}",
                 registry.home().project_file(&name).display()
             );
-            if registry.default_project()?.as_deref() == Some(name.as_str()) {
-                println!("`{name}` is now the default project");
-            }
+            println!("`{name}` is now the default project");
         }
         ProjectCommand::Ls { json } => {
             let projects = registry.list_projects()?;
@@ -110,6 +110,13 @@ fn project(registry: &Registry, cmd: ProjectCommand) -> Result<()> {
         ProjectCommand::Use { name } => {
             registry.set_default_project(&name)?;
             println!("default project: {name}");
+        }
+        ProjectCommand::Rm { name } => {
+            registry.remove_project(&name)?;
+            println!("removed project `{name}`");
+            if registry.default_project()?.is_none() {
+                println!("no default project: choose one with `octok project use <name>`");
+            }
         }
     }
     Ok(())
