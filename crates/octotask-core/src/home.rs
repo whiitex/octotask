@@ -33,4 +33,8 @@ impl Home {
     pub fn global_config_file(&self) -> PathBuf {
         self.root.join("config.yaml")
     }
+
+    pub fn registry_lock_file(&self) -> PathBuf {
+        self.root.join("registry.lock")
+    }
 }

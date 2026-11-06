@@ -1,4 +1,4 @@
-use std::fs;
+use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 
 use serde::de::DeserializeOwned;
@@ -53,6 +53,26 @@ pub(crate) fn write_new(path: &Path, contents: &str) -> Result<()> {
         path: path.to_path_buf(),
         source,
     })
+}
+
+/// Blocks until the exclusive lock on `path` is held, and keeps it until the returned file is dropped.
+/// The OS releases it if the process dies. The file is never deleted: two processes could
+/// otherwise end up locking different files at the same path.
+pub(crate) fn lock_exclusive(path: &Path) -> Result<File> {
+    let io = |source| Error::Io {
+        path: path.to_path_buf(),
+        source,
+    };
+    let dir = path.parent().expect("config paths always have a parent");
+    fs::create_dir_all(dir).map_err(io)?;
+    let file = File::options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)
+        .map_err(io)?;
+    file.lock().map_err(io)?;
+    Ok(file)
 }
 
 fn parse<T: DeserializeOwned>(raw: &str, path: &Path) -> Result<T> {

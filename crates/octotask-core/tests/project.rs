@@ -39,6 +39,59 @@ fn malformed_urls_are_rejected() {
 }
 
 #[test]
+fn malformed_urls_are_rejected_even_with_an_explicit_key() {
+    let mut p = Project::new("deeptree", "develop").unwrap();
+    for url in [
+        "",
+        "frontend",
+        "relative/path",
+        "https://",
+        "https://github.com/",
+        "git@github.com:",
+        "/",
+        "has space/repo.git",
+    ] {
+        assert!(
+            matches!(
+                p.add_repo(url, Some("key"), None),
+                Err(Error::InvalidUrl(_))
+            ),
+            "should reject {url:?}"
+        );
+    }
+    assert!(p.repos.is_empty());
+}
+
+#[test]
+fn explicit_key_allows_urls_without_a_derivable_key() {
+    let long_name = "x".repeat(65);
+    let long_url = format!("https://github.com/org/{long_name}.git");
+    for url in [
+        "git@github.com:org/.github.git",
+        "https://github.com/org/c++.git",
+        "/srv/git/project/.git",
+        long_url.as_str(),
+    ] {
+        let mut p = Project::new("deeptree", "develop").unwrap();
+        assert_eq!(p.add_repo(url, Some("key"), None).unwrap(), "key");
+        assert_eq!(p.repos["key"].url, url);
+    }
+}
+
+#[test]
+fn missing_key_for_underivable_url_asks_for_explicit_one() {
+    let mut p = Project::new("deeptree", "develop").unwrap();
+    let err = p
+        .add_repo("git@github.com:org/.github.git", None, None)
+        .unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "cannot derive a repo key from `git@github.com:org/.github.git`: choose one with `--name <key>`"
+    );
+    assert!(p.repos.is_empty());
+}
+
+#[test]
 fn add_repo_uses_derived_key_and_keeps_insertion_order() {
     let mut p = Project::new("deeptree", "develop").unwrap();
     assert_eq!(

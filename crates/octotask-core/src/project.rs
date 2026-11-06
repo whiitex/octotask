@@ -38,13 +38,13 @@ impl Project {
     /// Registers a repo. The key defaults to the last path segment of the url.
     /// Returns the key the repo was registered under.
     pub fn add_repo(&mut self, url: &str, key: Option<&str>, base: Option<&str>) -> Result<String> {
-        let derived = repo_key_from_url(url)?;
+        validated_url_path(url)?;
         let key = match key {
             Some(k) => {
                 validate_ident("repo key", k)?;
                 k.to_string()
             }
-            None => derived,
+            None => repo_key_from_url(url)?,
         };
         if let Some(b) = base {
             validate_branch(b)?;
@@ -79,7 +79,7 @@ impl Project {
         validate_branch(&self.base)?;
         for (key, repo) in &self.repos {
             validate_ident("repo key", key)?;
-            repo_key_from_url(&repo.url)?;
+            validated_url_path(&repo.url)?;
             if let Some(b) = &repo.base {
                 validate_branch(b)?;
             }
@@ -90,11 +90,16 @@ impl Project {
 
 /// Derives a repo key from a git url: `git@github.com:org/frontend.git` gives `frontend`.
 pub fn repo_key_from_url(url: &str) -> Result<String> {
-    let invalid = || Error::InvalidUrl(url.to_string());
-    let path = url_path(url.trim()).ok_or_else(invalid)?;
+    let path = validated_url_path(url)?;
     let key = repo_name_from_path(path);
-    validate_ident("repo key", key).map_err(|_| invalid())?;
+    validate_ident("repo key", key).map_err(|_| Error::NoRepoKey(url.trim().to_string()))?;
     Ok(key.to_string())
+}
+
+fn validated_url_path(url: &str) -> Result<&str> {
+    url_path(url.trim())
+        .filter(|path| !path.trim_matches('/').is_empty())
+        .ok_or_else(|| Error::InvalidUrl(url.to_string()))
 }
 
 fn url_path(url: &str) -> Option<&str> {

@@ -14,6 +14,8 @@ pub enum Error {
     },
     #[error("invalid git url `{0}`")]
     InvalidUrl(String),
+    #[error("cannot derive a repo key from `{0}`: choose one with `--name <key>`")]
+    NoRepoKey(String),
     #[error("repo `{0}` is already registered")]
     DuplicateRepo(String),
     #[error("repo `{0}` is not registered")]

@@ -1,4 +1,8 @@
 use std::fs;
+use std::sync::Barrier;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
+use std::time::Duration;
 
 use octotask_core::{Error, Home, Registry};
 use tempfile::TempDir;
@@ -12,12 +16,12 @@ fn registry() -> (TempDir, Registry) {
 #[test]
 fn init_writes_project_file_with_expected_yaml_shape() {
     let (dir, reg) = registry();
-    let mut p = reg.init_project("deeptree", "develop").unwrap();
-    p.add_repo("git@github.com:org/frontend.git", None, None)
-        .unwrap();
-    p.add_repo("git@github.com:org/agent.git", None, Some("main"))
-        .unwrap();
-    reg.save_project(&p).unwrap();
+    reg.init_project("deeptree", "develop").unwrap();
+    reg.update_project("deeptree", |p| {
+        p.add_repo("git@github.com:org/frontend.git", None, None)?;
+        p.add_repo("git@github.com:org/agent.git", None, Some("main"))
+    })
+    .unwrap();
 
     let path = dir.path().join("octotask-home/projects/deeptree.yaml");
     let raw = fs::read_to_string(&path).unwrap();
@@ -32,14 +36,14 @@ fn init_writes_project_file_with_expected_yaml_shape() {
 }
 
 #[test]
-fn saved_project_round_trips() {
+fn updated_project_round_trips() {
     let (_dir, reg) = registry();
-    let mut p = reg.init_project("deeptree", "develop").unwrap();
-    p.add_repo("git@github.com:org/frontend.git", None, None)
-        .unwrap();
-    p.add_repo("git@github.com:org/backend.git", None, None)
-        .unwrap();
-    reg.save_project(&p).unwrap();
+    reg.init_project("deeptree", "develop").unwrap();
+    reg.update_project("deeptree", |p| {
+        p.add_repo("git@github.com:org/frontend.git", None, None)?;
+        p.add_repo("git@github.com:org/backend.git", None, None)
+    })
+    .unwrap();
 
     let loaded = reg.load_project("deeptree").unwrap();
     let keys: Vec<&str> = loaded.repos.keys().map(String::as_str).collect();
@@ -50,10 +54,11 @@ fn saved_project_round_trips() {
 #[test]
 fn init_twice_fails_and_keeps_existing_file() {
     let (_dir, reg) = registry();
-    let mut p = reg.init_project("deeptree", "develop").unwrap();
-    p.add_repo("git@github.com:org/frontend.git", None, None)
-        .unwrap();
-    reg.save_project(&p).unwrap();
+    reg.init_project("deeptree", "develop").unwrap();
+    reg.update_project("deeptree", |p| {
+        p.add_repo("git@github.com:org/frontend.git", None, None)
+    })
+    .unwrap();
 
     assert!(
         matches!(reg.init_project("deeptree", "main"), Err(Error::ProjectExists(n)) if n == "deeptree")
@@ -244,15 +249,115 @@ fn load_rejects_hand_edited_invalid_repo_url() {
 }
 
 #[test]
-fn save_leaves_no_temp_files_behind() {
+fn load_accepts_hand_edited_url_without_a_derivable_key() {
     let (dir, reg) = registry();
-    let p = reg.init_project("deeptree", "develop").unwrap();
-    reg.save_project(&p).unwrap();
+    reg.init_project("deeptree", "develop").unwrap();
+    let path = dir.path().join("octotask-home/projects/deeptree.yaml");
+    fs::write(
+        &path,
+        "version: 1\nname: deeptree\nbase: develop\nrepos:\n  dotgithub:\n    url: git@github.com:org/.github.git\n",
+    )
+    .unwrap();
+    let project = reg.load_project("deeptree").unwrap();
+    assert_eq!(
+        project.repos["dotgithub"].url,
+        "git@github.com:org/.github.git"
+    );
+}
+
+#[test]
+fn update_returns_the_result_of_the_change() {
+    let (_dir, reg) = registry();
+    reg.init_project("deeptree", "develop").unwrap();
+    let key = reg
+        .update_project("deeptree", |p| {
+            p.add_repo("git@github.com:org/frontend.git", None, None)
+        })
+        .unwrap();
+    assert_eq!(key, "frontend");
+}
+
+#[test]
+fn failed_update_leaves_the_file_untouched_and_releases_the_lock() {
+    let (dir, reg) = registry();
+    reg.init_project("deeptree", "develop").unwrap();
+    let path = dir.path().join("octotask-home/projects/deeptree.yaml");
+    let before = fs::read_to_string(&path).unwrap();
+
+    let result = reg.update_project("deeptree", |p| {
+        p.add_repo("git@github.com:org/frontend.git", None, None)?;
+        p.add_repo("not-a-url", None, None)
+    });
+
+    assert!(matches!(result, Err(Error::InvalidUrl(_))));
+    assert_eq!(fs::read_to_string(&path).unwrap(), before);
+    reg.set_default_project("deeptree").unwrap();
+}
+
+#[test]
+fn update_of_missing_project_is_not_found_and_creates_nothing() {
+    let (dir, reg) = registry();
+    let result = reg.update_project("nope", |_| Ok(()));
+    assert!(matches!(result, Err(Error::ProjectNotFound(n)) if n == "nope"));
+    assert!(!dir.path().join("octotask-home/projects/nope.yaml").exists());
+}
+
+#[test]
+fn remove_waits_for_a_running_update_so_the_project_stays_removed() {
+    let (_dir, reg) = registry();
+    reg.init_project("deeptree", "develop").unwrap();
+    assert_waits_for_running_update(&reg, || reg.remove_project("deeptree").unwrap());
+    assert!(reg.list_projects().unwrap().is_empty());
+}
+
+#[test]
+fn set_default_waits_for_a_running_update() {
+    let (_dir, reg) = registry();
+    reg.init_project("deeptree", "develop").unwrap();
+    assert_waits_for_running_update(&reg, || reg.set_default_project("deeptree").unwrap());
+}
+
+#[test]
+fn init_waits_for_a_running_update() {
+    let (_dir, reg) = registry();
+    reg.init_project("deeptree", "develop").unwrap();
+    assert_waits_for_running_update(&reg, || {
+        reg.init_project("side", "main").unwrap();
+    });
+    assert_eq!(reg.default_project().unwrap().as_deref(), Some("side"));
+}
+
+#[test]
+fn update_leaves_no_temp_files_behind() {
+    let (dir, reg) = registry();
+    reg.init_project("deeptree", "develop").unwrap();
+    reg.update_project("deeptree", |_| Ok(())).unwrap();
     let names: Vec<String> = fs::read_dir(dir.path().join("octotask-home/projects"))
         .unwrap()
         .map(|e| e.unwrap().file_name().into_string().unwrap())
         .collect();
     assert_eq!(names, ["deeptree.yaml"]);
+}
+
+/// Runs `writer` during an update of `deeptree` and checks it only returns once the update is over.
+/// The sleep gives an unsynchronized writer time to finish early; a locking one passes regardless.
+fn assert_waits_for_running_update(reg: &Registry, writer: impl FnOnce()) {
+    let update_started = Barrier::new(2);
+    let update_finished = AtomicBool::new(false);
+    thread::scope(|scope| {
+        scope.spawn(|| {
+            reg.update_project("deeptree", |_| {
+                update_started.wait();
+                thread::sleep(Duration::from_millis(100));
+                update_finished.store(true, Ordering::SeqCst);
+                Ok(())
+            })
+            .unwrap();
+        });
+        update_started.wait();
+        writer();
+        assert!(update_finished.load(Ordering::SeqCst));
+    });
 }
 
 /// Minimal independent view of the on-disk format, so the shape test
