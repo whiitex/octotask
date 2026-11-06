@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::process::ExitStatus;
 
 use crate::utils::CONFIG_VERSION;
 
@@ -46,4 +47,29 @@ pub enum Error {
     },
     #[error("cannot locate home directory (set OCTOTASK_HOME)")]
     NoHome,
+    #[error("`{0}` not found: install it or add it to PATH")]
+    ToolNotFound(&'static str),
+    #[error("cannot run `{program}` in {dir}: {source}")]
+    Spawn {
+        program: &'static str,
+        dir: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("`{command}` failed in {dir} ({status}){}", stderr_block(.stderr))]
+    CommandFailed {
+        command: String,
+        dir: PathBuf,
+        status: ExitStatus,
+        stderr: String,
+    },
+}
+
+/// The tool's own stderr, on the lines after octok's summary.
+fn stderr_block(stderr: &str) -> String {
+    if stderr.is_empty() {
+        String::new()
+    } else {
+        format!("\n{stderr}")
+    }
 }
