@@ -17,8 +17,10 @@ pub enum Error {
     InvalidUrl(String),
     #[error("cannot derive a repo key from `{0}`: choose one with `--name <key>`")]
     NoRepoKey(String),
-    #[error("repo `{0}` is already registered")]
-    DuplicateRepo(String),
+    #[error("repo `{key}` is already registered ({url})\nchoose another name with `--name <key>`")]
+    DuplicateRepo { key: String, url: String },
+    #[error("alias `{alias}` is already used by repo `{repo}`")]
+    DuplicateAlias { alias: String, repo: String },
     #[error("repo `{0}` is not registered")]
     RepoNotFound(String),
     #[error("project `{0}` already exists")]
@@ -45,6 +47,26 @@ pub enum Error {
         #[source]
         source: std::io::Error,
     },
+    #[error("project `{0}` has no repos: add one with `octok repo add <url>`")]
+    NoRepos(String),
+    #[error("repo `{repo}` is used by workspaces: {}", .workspaces.join(", "))]
+    RepoInUse {
+        repo: String,
+        workspaces: Vec<String>,
+    },
+    #[error("repo `{repo}` has no branch `{base}` on its remote")]
+    BaseNotFound { repo: String, base: String },
+    #[error(
+        "branch `{branch}` already exists in: {}\nchoose another name, or delete the existing branch first",
+        .repos.join(", ")
+    )]
+    BranchExists { branch: String, repos: Vec<String> },
+    #[error("workspace `{name}` already exists at {path}")]
+    WorkspaceExists { name: String, path: PathBuf },
+    #[error("no workspace for `{0}`: create it with `octok checkout -b {0}`")]
+    WorkspaceNotFound(String),
+    #[error("not inside a workspace: pass its branch, as in `octok pull <branch>`")]
+    NotInWorkspace,
     #[error("cannot locate home directory (set OCTOTASK_HOME)")]
     NoHome,
     #[error("`{0}` not found: install it or add it to PATH")]

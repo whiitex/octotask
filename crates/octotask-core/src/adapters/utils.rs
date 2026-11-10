@@ -40,6 +40,25 @@ pub(super) fn run_captured(program: &'static str, dir: &Path, args: &[&str]) -> 
         .map_err(|source| spawn_error(program, dir, source))
 }
 
+/// Runs `program <args>` in `dir` with stderr left attached to octok's, so the user sees the
+/// tool's own progress. A failure carries no stderr: the tool has already printed it.
+pub(super) fn run_visible(program: &'static str, dir: &Path, args: &[&str]) -> Result<()> {
+    let status = command(program, dir, args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .status()
+        .map_err(|source| spawn_error(program, dir, source))?;
+    if status.success() {
+        return Ok(());
+    }
+    Err(Error::CommandFailed {
+        command: display_command(program, args),
+        dir: dir.to_path_buf(),
+        status,
+        stderr: String::new(),
+    })
+}
+
 /// Error for a command that ran and failed, carrying its own stderr unchanged.
 pub(super) fn failure(program: &'static str, dir: &Path, args: &[&str], output: &Output) -> Error {
     Error::CommandFailed {

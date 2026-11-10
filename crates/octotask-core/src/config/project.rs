@@ -18,6 +18,9 @@ pub struct Project {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Repo {
+    /// Short name accepted wherever a repo key is, e.g. `frontend`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
     pub url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
@@ -49,17 +52,51 @@ impl Project {
         if let Some(b) = base {
             validate_branch(b)?;
         }
-        if self.repos.contains_key(&key) {
-            return Err(Error::DuplicateRepo(key));
+        if let Some(existing) = self.repos.get(&key) {
+            return Err(Error::DuplicateRepo {
+                key,
+                url: existing.url.clone(),
+            });
+        }
+        if let Some((owner, _)) = self
+            .repos
+            .iter()
+            .find(|(_, repo)| repo.alias.as_deref() == Some(key.as_str()))
+        {
+            return Err(Error::DuplicateAlias {
+                alias: key,
+                repo: owner.clone(),
+            });
         }
         self.repos.insert(
             key.clone(),
             Repo {
+                alias: None,
                 url: url.trim().to_string(),
                 base: base.map(str::to_string),
             },
         );
         Ok(key)
+    }
+
+    /// Gives a registered repo a short name. Keys and aliases share one namespace.
+    pub fn set_alias(&mut self, key: &str, alias: &str) -> Result<()> {
+        if !self.repos.contains_key(key) {
+            return Err(Error::RepoNotFound(key.to_string()));
+        }
+        validate_ident("alias", alias)?;
+        self.ensure_alias_is_free(key, alias)?;
+        self.repos[key].alias = Some(alias.to_string());
+        Ok(())
+    }
+
+    /// Key of the repo that `name` refers to, as a key or as an alias.
+    pub fn resolve_repo(&self, name: &str) -> Result<&str> {
+        self.repos
+            .iter()
+            .find(|(key, repo)| *key == name || repo.alias.as_deref() == Some(name))
+            .map(|(key, _)| key.as_str())
+            .ok_or_else(|| Error::RepoNotFound(name.to_string()))
     }
 
     pub fn remove_repo(&mut self, key: &str) -> Result<Repo> {
@@ -83,8 +120,31 @@ impl Project {
             if let Some(b) = &repo.base {
                 validate_branch(b)?;
             }
+            if let Some(alias) = &repo.alias {
+                validate_ident("alias", alias)?;
+                self.ensure_alias_is_free(key, alias)?;
+            }
         }
         Ok(())
+    }
+
+    /// Keys and aliases share one namespace, so a name always points to one repo.
+    fn ensure_alias_is_free(&self, owner: &str, alias: &str) -> Result<()> {
+        let taken_by = if self.repos.contains_key(alias) {
+            Some(alias)
+        } else {
+            self.repos
+                .iter()
+                .find(|(key, repo)| *key != owner && repo.alias.as_deref() == Some(alias))
+                .map(|(key, _)| key.as_str())
+        };
+        match taken_by {
+            Some(repo) => Err(Error::DuplicateAlias {
+                alias: alias.to_string(),
+                repo: repo.to_string(),
+            }),
+            None => Ok(()),
+        }
     }
 }
 
@@ -161,7 +221,7 @@ pub(crate) fn validate_ident(kind: &'static str, value: &str) -> Result<()> {
 }
 
 /// A cheap subset of `git check-ref-format --branch`, enough to catch typos early.
-fn validate_branch(value: &str) -> Result<()> {
+pub(crate) fn validate_branch(value: &str) -> Result<()> {
     let fail = |reason| {
         Err(Error::InvalidName {
             kind: "branch",

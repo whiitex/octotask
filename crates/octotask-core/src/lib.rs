@@ -1,14 +1,18 @@
 //! Core library for `octok`: project configuration, the on-disk registry and the git and gh adapters.
 
 mod adapters;
+mod config;
 mod error;
 mod home;
-mod project;
-mod registry;
 mod utils;
+mod workspaces;
 
-pub use adapters::{Gh, Git};
+pub use adapters::{Commit, Gh, Git};
+pub use config::{Project, Registry, Repo, repo_key_from_url};
 pub use error::{Error, Result};
 pub use home::Home;
-pub use project::{Project, Repo, repo_key_from_url};
-pub use registry::Registry;
+pub use workspaces::{
+    Checkout, NewRepo, PullOutcome, RepoStatus, Status, WorkspaceStatus, create_workspace,
+    fetch_repos, locate_workspace, pull_workspace, register_repo, status, unregister_repo,
+    workspace_name, workspace_path,
+};

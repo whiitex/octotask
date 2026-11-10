@@ -389,3 +389,34 @@ mod serde_saphyr_check {
         serde_saphyr::from_str(raw).unwrap()
     }
 }
+
+#[test]
+fn alias_is_written_only_when_set_and_checked_on_load() {
+    let (_dir, reg) = registry();
+    reg.init_project("deeptree", "main").unwrap();
+    reg.update_project("deeptree", |p| {
+        p.add_repo("git@github.com:org/DeepTreeDashboard.git", None, None)?;
+        p.add_repo("git@github.com:org/DeepTreeBackend.git", None, None)?;
+        p.set_alias("DeepTreeDashboard", "frontend")
+    })
+    .unwrap();
+    let path = reg.home().project_file("deeptree");
+
+    let raw = fs::read_to_string(&path).unwrap();
+    assert_eq!(raw.matches("alias:").count(), 1, "{raw}");
+    assert_eq!(
+        reg.load_project("deeptree").unwrap().repos["DeepTreeDashboard"]
+            .alias
+            .as_deref(),
+        Some("frontend")
+    );
+
+    let hand_edited = raw.replace(
+        "DeepTreeBackend:\n",
+        "DeepTreeBackend:\n    alias: frontend\n",
+    );
+    assert_ne!(hand_edited, raw);
+    fs::write(&path, hand_edited).unwrap();
+    let err = reg.load_project("deeptree").unwrap_err();
+    assert!(matches!(err, Error::DuplicateAlias { .. }), "{err:?}");
+}

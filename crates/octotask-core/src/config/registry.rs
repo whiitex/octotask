@@ -4,7 +4,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::project::validate_ident;
+use super::project::validate_ident;
 use crate::utils::{
     CONFIG_VERSION, lock_exclusive, parse_versioned, to_yaml, write_atomic, write_new,
 };

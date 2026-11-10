@@ -37,4 +37,29 @@ impl Home {
     pub fn registry_lock_file(&self) -> PathBuf {
         self.root.join("registry.lock")
     }
+
+    pub fn caches_dir(&self, project: &str) -> PathBuf {
+        self.root.join("cache").join(project)
+    }
+
+    /// Bare clone shared by every workspace of the project.
+    pub fn cache_dir(&self, project: &str, repo: &str) -> PathBuf {
+        self.caches_dir(project).join(format!("{repo}.git"))
+    }
+
+    pub fn cache_lock_file(&self, project: &str, repo: &str) -> PathBuf {
+        self.caches_dir(project).join(format!("{repo}.lock"))
+    }
+
+    pub fn workspaces_root(&self) -> PathBuf {
+        self.root.join("workspaces")
+    }
+
+    pub fn workspaces_dir(&self, project: &str) -> PathBuf {
+        self.workspaces_root().join(project)
+    }
+
+    pub fn workspace_dir(&self, project: &str, workspace: &str) -> PathBuf {
+        self.workspaces_dir(project).join(workspace)
+    }
 }
