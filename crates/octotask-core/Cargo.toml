@@ -16,3 +16,11 @@ tempfile = "3.27.0"
 [[test]]
 name = "adapters"
 path = "tests/adapters/mod.rs"
+
+[[test]]
+name = "config"
+path = "tests/config/mod.rs"
+
+[[test]]
+name = "workspaces"
+path = "tests/workspaces/mod.rs"

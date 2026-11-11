@@ -137,7 +137,12 @@ fn duplicate_key_is_rejected_and_project_unchanged() {
     let err = p
         .add_repo("git@gitlab.com:other/frontend.git", None, None)
         .unwrap_err();
-    assert!(matches!(err, Error::DuplicateRepo(k) if k == "frontend"));
+    assert!(
+        matches!(&err, Error::DuplicateRepo { key, url }
+            if key == "frontend" && url == "git@github.com:org/frontend.git"),
+        "{err:?}"
+    );
+    assert!(err.to_string().contains("--name <key>"), "{err}");
     assert_eq!(p.repos["frontend"].url, "git@github.com:org/frontend.git");
 }
 
@@ -201,4 +206,74 @@ fn remove_repo_returns_it_and_errors_when_missing() {
     assert_eq!(removed.url, "git@github.com:org/frontend.git");
     assert!(p.repos.is_empty());
     assert!(matches!(p.remove_repo("frontend"), Err(Error::RepoNotFound(k)) if k == "frontend"));
+}
+
+fn project_with_frontend_alias() -> Project {
+    let mut p = Project::new("deeptree", "main").unwrap();
+    p.add_repo("git@github.com:org/DeepTreeDashboard.git", None, None)
+        .unwrap();
+    p.set_alias("DeepTreeDashboard", "frontend").unwrap();
+    p
+}
+
+#[test]
+fn repo_is_found_by_key_or_alias() {
+    let p = project_with_frontend_alias();
+
+    assert_eq!(
+        p.repos["DeepTreeDashboard"].alias.as_deref(),
+        Some("frontend")
+    );
+    assert_eq!(p.resolve_repo("frontend").unwrap(), "DeepTreeDashboard");
+    assert_eq!(
+        p.resolve_repo("DeepTreeDashboard").unwrap(),
+        "DeepTreeDashboard"
+    );
+    assert!(
+        matches!(p.resolve_repo("backend"), Err(Error::RepoNotFound(name)) if name == "backend")
+    );
+}
+
+#[test]
+fn alias_must_differ_from_every_key_and_alias() {
+    let mut p = project_with_frontend_alias();
+    p.add_repo("git@github.com:org/DeepTreeBackend.git", None, None)
+        .unwrap();
+
+    for (alias, owner) in [
+        ("frontend", "DeepTreeDashboard"),
+        ("DeepTreeDashboard", "DeepTreeDashboard"),
+        ("DeepTreeBackend", "DeepTreeBackend"),
+    ] {
+        let err = p.set_alias("DeepTreeBackend", alias).unwrap_err();
+        assert!(
+            matches!(&err, Error::DuplicateAlias { alias: a, repo } if a == alias && repo == owner),
+            "{alias}: {err:?}"
+        );
+    }
+    assert_eq!(p.repos["DeepTreeBackend"].alias, None);
+    assert!(matches!(
+        p.set_alias("DeepTreeBackend", "back end"),
+        Err(Error::InvalidName { kind: "alias", .. })
+    ));
+    assert!(matches!(
+        p.set_alias("missing", "x"),
+        Err(Error::RepoNotFound(_))
+    ));
+}
+
+#[test]
+fn repo_key_equal_to_an_existing_alias_is_rejected() {
+    let mut p = project_with_frontend_alias();
+
+    let err = p
+        .add_repo("git@github.com:org/frontend.git", None, None)
+        .unwrap_err();
+
+    assert!(
+        matches!(&err, Error::DuplicateAlias { alias, repo }
+            if alias == "frontend" && repo == "DeepTreeDashboard"),
+        "{err:?}"
+    );
+    assert_eq!(p.repos.len(), 1);
 }

@@ -5,4 +5,4 @@ mod git;
 mod utils;
 
 pub use gh::Gh;
-pub use git::Git;
+pub use git::{Commit, Git, origin_ref};
