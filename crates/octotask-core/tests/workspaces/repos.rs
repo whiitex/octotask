@@ -330,3 +330,19 @@ fn register_repo_does_not_ask_when_the_base_exists() {
     })
     .unwrap();
 }
+
+#[test]
+fn register_repo_clears_the_leftovers_of_an_interrupted_clone() {
+    let fx = Fixture::new();
+    let caches = fx.cache_dir("frontend").parent().unwrap().to_path_buf();
+    let leftover = caches.join("frontend.tmp-4242");
+    let unrelated = caches.join("frontend.tmp-4242.git");
+    std::fs::create_dir_all(leftover.join("objects")).unwrap();
+    std::fs::create_dir_all(&unrelated).unwrap();
+
+    fx.register(&fx.remote("frontend"));
+
+    assert!(!leftover.exists());
+    assert!(unrelated.is_dir());
+    assert!(fx.cache_dir("frontend").is_dir());
+}

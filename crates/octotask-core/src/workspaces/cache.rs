@@ -2,7 +2,7 @@ use std::fs::{self, File};
 use std::io::{self, ErrorKind, IsTerminal};
 use std::path::PathBuf;
 
-use crate::utils::lock_exclusive;
+use crate::utils::{lock_exclusive, remove_dir_if_present};
 use crate::{Error, Git, Home, Project, Result};
 
 /// Caches left behind by repos that are no longer in the project file, e.g. after renaming a key by hand.
@@ -75,12 +75,7 @@ impl Cache {
     /// Deletes the cache and its lock file.
     pub(crate) fn remove(&self) -> Result<()> {
         let _lock = self.lock()?;
-        match fs::remove_dir_all(&self.dir) {
-            Err(source) if source.kind() != ErrorKind::NotFound => {
-                return Err(self.io_error(source));
-            }
-            _ => {}
-        }
+        remove_dir_if_present(&self.dir)?;
         // Still held: a process already waiting on it gets the lock next, on a cache that is gone.
         let _ = fs::remove_file(&self.lock_file);
         Ok(())
@@ -90,6 +85,8 @@ impl Cache {
         if self.exists() {
             // The url may have changed in the project file since the clone.
             self.git().set_origin_url(url)?;
+            // Caches cloned by an older octok lack it.
+            self.git().push_new_branches_to_origin()?;
             return Ok(false);
         }
         self.clone_from(url)?;
@@ -98,6 +95,7 @@ impl Cache {
 
     /// Clones into a sibling directory first, so a failed clone never leaves a half-made cache.
     fn clone_from(&self, url: &str) -> Result<()> {
+        self.remove_interrupted_clones()?;
         let staging = self
             .dir
             .with_extension(format!("tmp-{}", std::process::id()));
@@ -106,12 +104,36 @@ impl Cache {
         let cloned = git
             .init_bare()
             .and_then(|()| git.add_origin(url))
+            .and_then(|()| git.push_new_branches_to_origin())
             .and_then(|()| fetch_whole_history(&git))
             .and_then(|()| fs::rename(&staging, &self.dir).map_err(|source| self.io_error(source)));
         if cloned.is_err() {
             let _ = fs::remove_dir_all(&staging);
         }
         cloned
+    }
+
+    /// Staging directories of clones that died before the rename, e.g. on Ctrl-C.
+    /// The cache lock is held, so none of them belongs to a running clone.
+    fn remove_interrupted_clones(&self) -> Result<()> {
+        let (Some(parent), Some(stem)) = (self.dir.parent(), self.dir.file_stem()) else {
+            return Ok(());
+        };
+        let prefix = format!("{}.tmp-", stem.to_string_lossy());
+        let Ok(entries) = fs::read_dir(parent) else {
+            return Ok(());
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let is_staging = name
+                .to_str()
+                .and_then(|name| name.strip_prefix(&prefix))
+                .is_some_and(|pid| !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit()));
+            if is_staging {
+                fs::remove_dir_all(entry.path()).map_err(|source| self.io_error(source))?;
+            }
+        }
+        Ok(())
     }
 
     fn io_error(&self, source: io::Error) -> Error {

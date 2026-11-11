@@ -1,4 +1,5 @@
 use std::fs::{self, File};
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use serde::de::DeserializeOwned;
@@ -73,6 +74,17 @@ pub(crate) fn lock_exclusive(path: &Path) -> Result<File> {
         .map_err(io)?;
     file.lock().map_err(io)?;
     Ok(file)
+}
+
+/// Deletes a directory tree. A directory that is already gone is not an error.
+pub(crate) fn remove_dir_if_present(path: &Path) -> Result<()> {
+    match fs::remove_dir_all(path) {
+        Err(source) if source.kind() != ErrorKind::NotFound => Err(Error::Io {
+            path: path.to_path_buf(),
+            source,
+        }),
+        _ => Ok(()),
+    }
 }
 
 fn parse<T: DeserializeOwned>(raw: &str, path: &Path) -> Result<T> {
