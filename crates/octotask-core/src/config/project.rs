@@ -90,6 +90,35 @@ impl Project {
         Ok(())
     }
 
+    pub fn clear_alias(&mut self, key: &str) -> Result<()> {
+        self.repo_mut(key)?.alias = None;
+        Ok(())
+    }
+
+    /// Sets the base branch of one repo. `None` goes back to the project's base.
+    pub fn set_repo_base(&mut self, key: &str, base: Option<&str>) -> Result<()> {
+        let repo = self.repo_mut(key)?;
+        if let Some(base) = base {
+            validate_branch(base)?;
+        }
+        repo.base = base.map(str::to_string);
+        Ok(())
+    }
+
+    pub fn set_repo_url(&mut self, key: &str, url: &str) -> Result<()> {
+        let repo = self.repo_mut(key)?;
+        validated_url_path(url)?;
+        repo.url = url.trim().to_string();
+        Ok(())
+    }
+
+    /// Sets the base branch used by the repos that do not override it.
+    pub fn set_base(&mut self, base: &str) -> Result<()> {
+        validate_branch(base)?;
+        self.base = base.to_string();
+        Ok(())
+    }
+
     /// Key of the repo that `name` refers to, as a key or as an alias.
     pub fn resolve_repo(&self, name: &str) -> Result<&str> {
         self.repos
@@ -126,6 +155,12 @@ impl Project {
             }
         }
         Ok(())
+    }
+
+    fn repo_mut(&mut self, key: &str) -> Result<&mut Repo> {
+        self.repos
+            .get_mut(key)
+            .ok_or_else(|| Error::RepoNotFound(key.to_string()))
     }
 
     /// Keys and aliases share one namespace, so a name always points to one repo.

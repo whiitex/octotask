@@ -975,3 +975,71 @@ fn status_text_points_out_a_repo_without_worktree_in_a_workspace() {
             "    backend   no worktree: add it with `octok branch feat/login`\n",
         ));
 }
+
+#[test]
+fn repo_set_changes_alias_base_and_url() {
+    let env = Env::with_repos(&["frontend"]);
+    git(&env.remote_dir("frontend"), &["branch", "develop"]);
+    let fork = env.remote_with_branch("fork", "develop");
+
+    env.octok(&[
+        "repo", "set", "frontend", "--alias", "web", "--base", "develop",
+    ])
+    .assert()
+    .success()
+    .stdout("updated `frontend (web)` in deeptree\n");
+    env.octok(&["repo", "set", "web", "--url", &fork])
+        .assert()
+        .success();
+    assert_eq!(
+        env.stdout(&["repo", "ls"]),
+        format!("frontend (web)  develop  {fork}\n")
+    );
+
+    env.octok(&["repo", "set", "web", "--no-alias", "--no-base"])
+        .assert()
+        .success()
+        .stdout("updated `frontend` in deeptree\n");
+    assert_eq!(
+        env.stdout(&["repo", "ls"]),
+        format!("frontend  main  {fork}\n")
+    );
+}
+
+#[test]
+fn repo_set_rejects_missing_or_contradictory_options_and_unknown_bases() {
+    let env = Env::with_repos(&["frontend"]);
+
+    env.octok(&["repo", "set", "frontend"]).assert().code(2);
+    env.octok(&["repo", "set", "frontend", "--alias", "web", "--no-alias"])
+        .assert()
+        .code(2);
+    env.octok(&["repo", "set", "frontend", "--base", "nope"])
+        .assert()
+        .code(1)
+        .stderr("error: repo `frontend` has no branch `nope` on its remote\n");
+    env.octok(&["repo", "set", "missing", "--alias", "web"])
+        .assert()
+        .code(1)
+        .stderr("error: repo `missing` is not registered\n");
+    assert_eq!(
+        env.stdout(&["repo", "ls"]),
+        format!("frontend  main  {}\n", env.remote_url("frontend"))
+    );
+}
+
+#[test]
+fn project_set_changes_the_base_and_warns_about_repos_without_it() {
+    let env = Env::with_repos(&["frontend", "backend"]);
+    git(&env.remote_dir("backend"), &["branch", "develop"]);
+    env.octok(&["fetch"]).assert().success();
+
+    env.octok(&["project", "set", "--base", "develop"])
+        .assert()
+        .success()
+        .stdout("base of `deeptree` is now `develop`\n")
+        .stderr("warning: branch `develop` is not on the remote of: frontend\n");
+
+    assert!(env.read("projects/deeptree.yaml").contains("base: develop"));
+    env.octok(&["project", "set"]).assert().code(2);
+}

@@ -277,3 +277,60 @@ fn repo_key_equal_to_an_existing_alias_is_rejected() {
     );
     assert_eq!(p.repos.len(), 1);
 }
+
+#[test]
+fn alias_base_and_url_of_a_repo_can_be_changed() {
+    let mut p = project_with_frontend_alias();
+    let key = "DeepTreeDashboard";
+
+    p.set_alias(key, "web").unwrap();
+    p.set_repo_base(key, Some("develop")).unwrap();
+    p.set_repo_url(key, " git@github.com:fork/DeepTreeDashboard.git ")
+        .unwrap();
+    let repo = &p.repos[key];
+    assert_eq!(repo.alias.as_deref(), Some("web"));
+    assert_eq!(repo.base.as_deref(), Some("develop"));
+    assert_eq!(repo.url, "git@github.com:fork/DeepTreeDashboard.git");
+
+    p.clear_alias(key).unwrap();
+    p.set_repo_base(key, None).unwrap();
+    assert_eq!(p.repos[key].alias, None);
+    assert_eq!(p.effective_base(&p.repos[key]), "main");
+}
+
+#[test]
+fn invalid_repo_changes_are_rejected_and_change_nothing() {
+    let mut p = project_with_frontend_alias();
+    let before = p.clone();
+    let key = "DeepTreeDashboard";
+
+    assert!(matches!(
+        p.set_repo_base(key, Some("bad branch")),
+        Err(Error::InvalidName { kind: "branch", .. })
+    ));
+    assert!(matches!(
+        p.set_repo_url(key, "not a url"),
+        Err(Error::InvalidUrl(_))
+    ));
+    assert!(matches!(
+        p.set_base("bad branch"),
+        Err(Error::InvalidName { kind: "branch", .. })
+    ));
+    for result in [
+        p.clear_alias("missing"),
+        p.set_repo_base("missing", None),
+        p.set_repo_url("missing", "git@github.com:org/x.git"),
+    ] {
+        assert!(matches!(result, Err(Error::RepoNotFound(_))));
+    }
+    assert_eq!(p, before);
+}
+
+#[test]
+fn project_base_can_be_changed() {
+    let mut p = project_with_frontend_alias();
+
+    p.set_base("develop").unwrap();
+
+    assert_eq!(p.effective_base(&p.repos["DeepTreeDashboard"]), "develop");
+}

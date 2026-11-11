@@ -1,7 +1,8 @@
 use std::fs;
 
 use octotask_core::{
-    Error, NewRepo, create_workspace, fetch_repos, register_repo, unregister_repo,
+    Error, NewRepo, RepoChanges, create_workspace, fetch_repos, register_repo, unregister_repo,
+    update_repo,
 };
 
 use super::{Fixture, PROJECT, commit_on, git, head, refuse_missing_base};
@@ -345,4 +346,150 @@ fn register_repo_clears_the_leftovers_of_an_interrupted_clone() {
     assert!(!leftover.exists());
     assert!(unrelated.is_dir());
     assert!(fx.cache_dir("frontend").is_dir());
+}
+
+#[test]
+fn update_repo_changes_the_alias_without_touching_the_network() {
+    let fx = Fixture::new();
+    fx.register(&fx.remote("frontend"));
+    fs::remove_dir_all(fx.remote_dir("frontend")).unwrap();
+    let set = RepoChanges {
+        alias: Some(Some("web")),
+        ..Default::default()
+    };
+    let clear = RepoChanges {
+        alias: Some(None),
+        ..Default::default()
+    };
+
+    let key = update_repo(
+        &fx.registry(),
+        PROJECT,
+        "frontend",
+        &set,
+        refuse_missing_base,
+    )
+    .unwrap();
+    assert_eq!(key, "frontend");
+    assert_eq!(fx.project().repos["frontend"].alias.as_deref(), Some("web"));
+
+    update_repo(&fx.registry(), PROJECT, "web", &clear, refuse_missing_base).unwrap();
+    assert_eq!(fx.project().repos["frontend"].alias, None);
+}
+
+#[test]
+fn update_repo_asks_before_using_a_base_missing_on_the_remote() {
+    let fx = Fixture::new();
+    fx.register(&fx.remote("frontend"));
+    // Pushed after the clone: only a fetch can see it.
+    commit_on(&fx.remote_dir("frontend"), "develop", "on develop");
+    let to = |base| RepoChanges {
+        base: Some(base),
+        ..Default::default()
+    };
+    let mut asked = Vec::new();
+
+    update_repo(
+        &fx.registry(),
+        PROJECT,
+        "frontend",
+        &to(Some("develop")),
+        refuse_missing_base,
+    )
+    .unwrap();
+    assert_eq!(
+        fx.project().repos["frontend"].base.as_deref(),
+        Some("develop")
+    );
+
+    let err = update_repo(
+        &fx.registry(),
+        PROJECT,
+        "frontend",
+        &to(Some("nope")),
+        |key, base| {
+            asked.push((key.to_string(), base.to_string()));
+            false
+        },
+    )
+    .unwrap_err();
+    assert_eq!(asked, [("frontend".to_string(), "nope".to_string())]);
+    assert!(matches!(err, Error::BaseNotFound { .. }), "{err:?}");
+    assert_eq!(
+        fx.project().repos["frontend"].base.as_deref(),
+        Some("develop")
+    );
+
+    update_repo(
+        &fx.registry(),
+        PROJECT,
+        "frontend",
+        &to(Some("nope")),
+        |_, _| true,
+    )
+    .unwrap();
+    assert_eq!(fx.project().repos["frontend"].base.as_deref(), Some("nope"));
+    update_repo(
+        &fx.registry(),
+        PROJECT,
+        "frontend",
+        &to(None),
+        refuse_missing_base,
+    )
+    .unwrap();
+    assert_eq!(fx.project().repos["frontend"].base, None);
+}
+
+#[test]
+fn update_repo_points_the_cache_to_a_new_url() {
+    let fx = Fixture::new();
+    let old = fx.remote("old");
+    let new = fx.remote("new");
+    commit_on(&fx.remote_dir("new"), "main", "only in new");
+    register_repo(
+        &fx.registry(),
+        PROJECT,
+        &NewRepo {
+            url: &old,
+            key: Some("app"),
+            ..Default::default()
+        },
+        refuse_missing_base,
+    )
+    .unwrap();
+    let to = |url| RepoChanges {
+        url: Some(url),
+        ..Default::default()
+    };
+
+    update_repo(
+        &fx.registry(),
+        PROJECT,
+        "app",
+        &to(&new),
+        refuse_missing_base,
+    )
+    .unwrap();
+
+    assert_eq!(fx.project().repos["app"].url, new);
+    assert_eq!(
+        head(&fx.cache_dir("app"), "refs/remotes/origin/main"),
+        head(&fx.remote_dir("new"), "main")
+    );
+
+    let unreachable = fx.remote_dir("gone").display().to_string();
+    let err = update_repo(
+        &fx.registry(),
+        PROJECT,
+        "app",
+        &to(&unreachable),
+        refuse_missing_base,
+    )
+    .unwrap_err();
+    assert!(matches!(err, Error::CommandFailed { .. }), "{err:?}");
+    assert_eq!(fx.project().repos["app"].url, new);
+    assert_eq!(
+        git(&fx.cache_dir("app"), &["remote", "get-url", "origin"]),
+        new
+    );
 }
