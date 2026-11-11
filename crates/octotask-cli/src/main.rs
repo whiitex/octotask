@@ -6,7 +6,8 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use octotask_core::{
     Error, Home, NewRepo, Registry, Result, create_workspace, fetch_repos, locate_workspace,
-    pull_workspace, register_repo, status, unregister_repo, workspace_name, workspace_path,
+    pull_workspace, register_repo, remove_project, remove_workspace, status, unregister_repo,
+    workspace_name, workspace_path,
 };
 
 use utils::{
@@ -36,7 +37,17 @@ enum Command {
     /// Fetch every repo of the project, cloning the ones not cached yet
     Fetch,
     /// Create a workspace: one worktree per repo, on a new branch from the up-to-date base
+    ///
+    /// On a workspace that already exists, adds the worktrees it lacks: this completes an
+    /// interrupted creation and brings in the repos registered later.
     Branch { name: String },
+    /// Delete a workspace: its worktrees, its folder and the local branches
+    Rm {
+        /// Also discard uncommitted changes and unpushed commits
+        #[arg(long)]
+        force: bool,
+        branch: String,
+    },
     /// Print the path of a workspace, e.g. `cd "$(octok checkout feat/login)"`
     Checkout {
         /// Create the workspace first, like `octok branch`
@@ -72,7 +83,7 @@ enum ProjectCommand {
     },
     /// Set the default project
     Use { name: String },
-    /// Delete a project and its list of repos
+    /// Delete a project, its list of repos and their clones
     Rm { name: String },
 }
 
@@ -131,6 +142,12 @@ fn run(cli: Cli) -> Result<ExitCode> {
             let path = workspace_path(registry.home(), &resolve_project()?, &branch)?;
             println!("{}", path.display());
         }
+        Command::Rm { force, branch } => {
+            let project_name = resolve_project()?;
+            let project = registry.load_project(&project_name)?;
+            let name = remove_workspace(registry.home(), &project, &branch, force)?;
+            println!("removed workspace `{name}` from {project_name}");
+        }
         Command::Pull { branch } => return pull(&registry, explicit_project, branch.as_deref()),
         Command::Status { json } => {
             let project = registry.load_project(&resolve_project()?)?;
@@ -160,7 +177,7 @@ fn project(registry: &Registry, cmd: ProjectCommand) -> Result<()> {
             println!("default project: {name}");
         }
         ProjectCommand::Rm { name } => {
-            registry.remove_project(&name)?;
+            remove_project(registry, &name)?;
             println!("removed project `{name}`");
             if registry.default_project()?.is_none() {
                 println!("no default project: choose one with `octok project use <name>`");
@@ -206,12 +223,23 @@ fn fetch(registry: &Registry, project_name: &str) -> Result<ExitCode> {
 /// Prints only the path on stdout, so `cd "$(octok branch <name>)"` works.
 fn create(registry: &Registry, project_name: &str, branch: &str) -> Result<()> {
     let project = registry.load_project(project_name)?;
-    let path = create_workspace(registry.home(), &project, branch)?;
-    eprintln!(
-        "created workspace `{}` in {project_name}",
-        workspace_name(branch)
-    );
-    println!("{}", path.display());
+    let workspace = create_workspace(registry.home(), &project, branch)?;
+    let name = workspace_name(branch);
+    if workspace.kept.is_empty() && workspace.restored.is_empty() {
+        eprintln!("created workspace `{name}` in {project_name}");
+    } else {
+        eprintln!("completed workspace `{name}` in {project_name}");
+    }
+    if !workspace.restored.is_empty() {
+        eprintln!(
+            "  branch restored from the cache: {}",
+            workspace.restored.join(", ")
+        );
+    }
+    if !workspace.kept.is_empty() && !workspace.created.is_empty() {
+        eprintln!("  new branch: {}", workspace.created.join(", "));
+    }
+    println!("{}", workspace.path.display());
     Ok(())
 }
 

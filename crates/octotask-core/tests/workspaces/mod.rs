@@ -1,6 +1,7 @@
 //! Tests for `src/workspaces/`, one file per source file, plus the fixtures they share:
 //! local git repos used as remotes, with no network.
 
+mod project;
 mod repos;
 mod workspace;
 

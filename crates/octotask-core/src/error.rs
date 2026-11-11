@@ -57,10 +57,23 @@ pub enum Error {
     #[error("repo `{repo}` has no branch `{base}` on its remote")]
     BaseNotFound { repo: String, base: String },
     #[error(
-        "branch `{branch}` already exists in: {}\nchoose another name, or delete the existing branch first",
+        "branch `{branch}` already exists on the remote of: {}\nchoose another name, or delete the existing branch first",
         .repos.join(", ")
     )]
     BranchExists { branch: String, repos: Vec<String> },
+    #[error(
+        "workspace `{name}` has work that would be lost:\n{}\nremove it anyway with `octok rm --force <branch>`",
+        indented(.reasons)
+    )]
+    WorkspaceHasWork { name: String, reasons: Vec<String> },
+    #[error(
+        "project `{project}` still has workspaces: {}\nremove them first with `octok rm <branch>`",
+        .workspaces.join(", ")
+    )]
+    ProjectInUse {
+        project: String,
+        workspaces: Vec<String>,
+    },
     #[error("workspace `{name}` already exists at {path}")]
     WorkspaceExists { name: String, path: PathBuf },
     #[error("no workspace for `{0}`: create it with `octok checkout -b {0}`")]
@@ -78,6 +91,8 @@ pub enum Error {
         #[source]
         source: std::io::Error,
     },
+    #[error("`{command}` printed `{output}`, which octok does not understand")]
+    UnexpectedOutput { command: String, output: String },
     #[error("`{command}` failed in {dir} ({status}){}", stderr_block(.stderr))]
     CommandFailed {
         command: String,
@@ -85,6 +100,14 @@ pub enum Error {
         status: ExitStatus,
         stderr: String,
     },
+}
+
+fn indented(lines: &[String]) -> String {
+    lines
+        .iter()
+        .map(|line| format!("  {line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// The tool's own stderr, on the lines after octok's summary.

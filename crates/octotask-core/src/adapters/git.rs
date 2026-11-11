@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use super::utils::{failure, run_captured, run_checked, run_visible};
-use crate::Result;
+use crate::{Error, Result};
 
 const PROGRAM: &str = "git";
 const ORIGIN: &str = "origin";
@@ -68,6 +68,13 @@ impl Git {
             .map(drop)
     }
 
+    /// Makes a plain `git push` publish a new branch to `origin` and track it,
+    /// in every worktree of this repository.
+    pub fn push_new_branches_to_origin(&self) -> Result<()> {
+        self.run(&["config", "push.autoSetupRemote", "true"])
+            .map(drop)
+    }
+
     /// Updates the remote-tracking refs of `origin`, dropping the ones deleted on the remote.
     pub fn fetch_origin(&self) -> Result<()> {
         self.run(&["fetch", "--prune", "--quiet", ORIGIN]).map(drop)
@@ -110,6 +117,18 @@ impl Git {
         .map(drop)
     }
 
+    /// Checks out the existing `branch` in a new worktree at `path`.
+    pub fn checkout_worktree(&self, path: &Path, branch: &str) -> Result<()> {
+        let path = path.to_string_lossy();
+        self.run(&["worktree", "add", "--quiet", "--", &path, branch])
+            .map(drop)
+    }
+
+    /// Forgets the worktrees whose directory is gone, freeing their branches.
+    pub fn prune_worktrees(&self) -> Result<()> {
+        self.run(&["worktree", "prune"]).map(drop)
+    }
+
     /// Deletes the worktree at `path`, uncommitted changes included.
     pub fn remove_worktree(&self, path: &Path) -> Result<()> {
         let path = path.to_string_lossy();
@@ -140,6 +159,22 @@ impl Git {
             subject: next(),
             date: next(),
             age: next(),
+        })
+    }
+
+    /// Whether the working tree has modified, staged or untracked files.
+    pub fn has_changes(&self) -> Result<bool> {
+        let changes = self.run(&["status", "--porcelain"])?;
+        Ok(!changes.is_empty())
+    }
+
+    /// How many commits of `rev` are on no branch of `origin`, as of the last fetch or push.
+    pub fn unpushed_commits(&self, rev: &str) -> Result<usize> {
+        let args = ["rev-list", "--count", rev, "--not", "--remotes=origin"];
+        let count = self.run(&args)?;
+        count.trim().parse().map_err(|_| Error::UnexpectedOutput {
+            command: format!("{PROGRAM} {}", args.join(" ")),
+            output: count.trim().to_string(),
         })
     }
 

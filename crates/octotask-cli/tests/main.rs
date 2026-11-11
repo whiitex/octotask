@@ -575,7 +575,7 @@ fn branch_that_already_exists_is_refused_with_a_hint() {
         .code(1)
         .stdout("")
         .stderr(
-            "error: branch `feat/login` already exists in: backend (on the remote)\n\
+            "error: branch `feat/login` already exists on the remote of: backend\n\
              choose another name, or delete the existing branch first\n",
         );
 
@@ -854,4 +854,124 @@ fn status_text_explains_a_base_branch_missing_on_the_remote() {
         "{out}"
     );
     assert_eq!(env.json(&["status", "--json"])["repos"][0]["cached"], true);
+}
+
+#[test]
+fn branch_on_an_existing_workspace_adds_the_repos_that_joined_later() {
+    let env = Env::with_repos(&["frontend"]);
+    env.octok(&["branch", "feat/login"]).assert().success();
+    env.octok(&["repo", "add", &env.remote("backend")])
+        .assert()
+        .success();
+    let path = env.workspace_dir("feat-login");
+
+    env.octok(&["branch", "feat/login"])
+        .assert()
+        .success()
+        .stdout(format!("{}\n", path.display()))
+        .stderr(
+            "completed workspace `feat-login` in deeptree\n\
+             \x20 new branch: backend\n",
+        );
+    env.octok(&["branch", "feat/login"])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("already exists"));
+
+    fs::remove_dir_all(path.join("frontend")).unwrap();
+    env.octok(&["branch", "feat/login"])
+        .assert()
+        .success()
+        .stderr(
+            "completed workspace `feat-login` in deeptree\n\
+         \x20 branch restored from the cache: frontend\n",
+        );
+}
+
+#[test]
+fn rm_deletes_a_workspace_unless_it_holds_unsaved_work() {
+    let env = Env::with_repos(&["frontend", "backend"]);
+    env.octok(&["branch", "feat/login"]).assert().success();
+    let path = env.workspace_dir("feat-login");
+    fs::write(path.join("frontend/draft.txt"), "wip").unwrap();
+    commit(&path.join("backend"), "local work");
+
+    env.octok(&["rm", "feat/login"]).assert().code(1).stderr(
+        "error: workspace `feat-login` has work that would be lost:\n\
+         \x20 frontend: uncommitted changes\n\
+         \x20 backend: 1 unpushed commit on `feat/login`\n\
+         remove it anyway with `octok rm --force <branch>`\n",
+    );
+    assert!(path.join("frontend/draft.txt").is_file());
+
+    env.octok(&["rm", "--force", "feat/login"])
+        .assert()
+        .success()
+        .stdout("removed workspace `feat-login` from deeptree\n");
+    assert!(!path.exists());
+    env.octok(&["rm", "feat/login"])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("no workspace for `feat/login`"));
+    env.octok(&["branch", "feat/login"]).assert().success();
+}
+
+#[test]
+fn project_rm_is_refused_with_workspaces_and_then_deletes_the_caches() {
+    let env = Env::with_repos(&["frontend"]);
+    env.octok(&["branch", "feat/login"]).assert().success();
+
+    env.octok(&["project", "rm", "deeptree"])
+        .assert()
+        .code(1)
+        .stderr(
+            "error: project `deeptree` still has workspaces: feat-login\n\
+             remove them first with `octok rm <branch>`\n",
+        );
+    assert_eq!(env.project_dir_entries(), ["deeptree.yaml"]);
+
+    env.octok(&["rm", "feat/login"]).assert().success();
+    env.octok(&["project", "rm", "deeptree"]).assert().success();
+    assert!(!env.dir.path().join("cache/deeptree").exists());
+
+    // A new project with the same name starts empty.
+    env.octok(&["project", "init", "deeptree"])
+        .assert()
+        .success();
+    env.octok(&["status"]).assert().success().stdout(
+        "project: deeptree\n\n\
+         repos: none (add one with `octok repo add <url>`)\n\n\
+         workspaces: none (create one with `octok branch <name>`)\n",
+    );
+}
+
+#[test]
+fn status_text_shows_a_broken_worktree_next_to_the_healthy_ones() {
+    let env = Env::with_repos(&["frontend", "backend"]);
+    env.octok(&["branch", "feat/login"]).assert().success();
+    fs::remove_dir_all(env.dir.path().join("cache/deeptree/backend.git/worktrees")).unwrap();
+
+    env.octok(&["status"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("    frontend  feat/login  "))
+        .stdout(predicate::str::contains(
+            "    backend   cannot be read: fatal: not a git repository",
+        ));
+}
+
+#[test]
+fn status_text_points_out_a_repo_without_worktree_in_a_workspace() {
+    let env = Env::with_repos(&["frontend"]);
+    env.octok(&["branch", "feat/login"]).assert().success();
+    env.octok(&["repo", "add", &env.remote("backend")])
+        .assert()
+        .success();
+
+    env.octok(&["status"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "    backend   no worktree: add it with `octok branch feat/login`\n",
+        ));
 }

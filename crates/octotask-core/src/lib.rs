@@ -12,7 +12,7 @@ pub use config::{Project, Registry, Repo, repo_key_from_url};
 pub use error::{Error, Result};
 pub use home::Home;
 pub use workspaces::{
-    Checkout, NewRepo, PullOutcome, RepoStatus, Status, WorkspaceStatus, create_workspace,
-    fetch_repos, locate_workspace, pull_workspace, register_repo, status, unregister_repo,
-    workspace_name, workspace_path,
+    Checkout, NewRepo, NewWorkspace, PullOutcome, RepoStatus, Status, WorkspaceStatus,
+    create_workspace, fetch_repos, locate_workspace, pull_workspace, register_repo, remove_project,
+    remove_workspace, status, unregister_repo, workspace_name, workspace_path,
 };

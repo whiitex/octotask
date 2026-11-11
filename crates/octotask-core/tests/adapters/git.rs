@@ -143,3 +143,62 @@ fn fetch_showing_progress_leaves_stderr_to_git() {
         "{err:?}"
     );
 }
+
+#[test]
+fn has_changes_sees_untracked_files() {
+    let repo = TempDir::new().unwrap();
+    init_repo(repo.path());
+    commit_empty(repo.path());
+    let git = Git::new(repo.path());
+
+    assert!(!git.has_changes().unwrap());
+    std::fs::write(repo.path().join("draft.txt"), "wip").unwrap();
+    assert!(git.has_changes().unwrap());
+}
+
+#[test]
+fn unpushed_commits_counts_what_no_remote_branch_contains() {
+    let remote = TempDir::new().unwrap();
+    init_repo(remote.path());
+    commit_empty(remote.path());
+    let bare = TempDir::new().unwrap();
+    let git = Git::new(bare.path());
+    git.init_bare().unwrap();
+    git.add_origin(&remote.path().display().to_string())
+        .unwrap();
+    git.fetch_origin().unwrap();
+    let remote_branch = Git::new(remote.path()).current_branch().unwrap().unwrap();
+    let parent = TempDir::new().unwrap();
+    let worktree = parent.path().join("feature");
+    git.add_worktree(
+        &worktree,
+        "feat/login",
+        &format!("refs/remotes/origin/{remote_branch}"),
+    )
+    .unwrap();
+
+    assert_eq!(git.unpushed_commits("refs/heads/feat/login").unwrap(), 0);
+    commit_empty(&worktree);
+    commit_empty(&worktree);
+    assert_eq!(git.unpushed_commits("refs/heads/feat/login").unwrap(), 2);
+}
+
+#[test]
+fn a_worktree_deleted_by_hand_is_pruned_and_its_branch_checked_out_again() {
+    let repo = TempDir::new().unwrap();
+    init_repo(repo.path());
+    commit_empty(repo.path());
+    let git = Git::new(repo.path());
+    let parent = TempDir::new().unwrap();
+    let worktree = parent.path().join("feature");
+    git.add_worktree(&worktree, "feat/login", "HEAD").unwrap();
+    std::fs::remove_dir_all(&worktree).unwrap();
+
+    git.prune_worktrees().unwrap();
+    git.checkout_worktree(&worktree, "feat/login").unwrap();
+
+    assert_eq!(
+        Git::new(&worktree).current_branch().unwrap().as_deref(),
+        Some("feat/login")
+    );
+}

@@ -1,7 +1,7 @@
 use std::io::{BufRead, Write};
 use std::process::ExitCode;
 
-use octotask_core::{Commit, Project, PullOutcome, Result, Status};
+use octotask_core::{Checkout, Commit, Project, PullOutcome, Result, Status, WorkspaceStatus};
 use serde_json::json;
 
 pub(crate) fn print_projects(projects: &[String], default: Option<&str>, json: bool) {
@@ -190,26 +190,48 @@ fn print_status_workspaces(status: &Status) {
     println!("workspaces:");
     for workspace in &status.workspaces {
         println!("  {}  {}", workspace.name, workspace.path.display());
-        let labels: Vec<String> = workspace
-            .checkouts
-            .iter()
-            .map(|checkout| status_repo_label(status, &checkout.repo))
-            .collect();
-        let branches: Vec<&str> = workspace
-            .checkouts
-            .iter()
-            .map(|checkout| checkout.branch.as_deref().unwrap_or("(detached)"))
-            .collect();
-        let label_width = max_width(labels.iter().map(String::as_str));
-        let branch_width = max_width(branches.iter().copied());
-        let sha_width = sha_width(workspace.checkouts.iter().map(|c| &c.commit));
-        for ((checkout, label), branch) in workspace.checkouts.iter().zip(labels).zip(branches) {
-            println!(
-                "    {label:label_width$}  {branch:branch_width$}  {}",
-                commit_line(&checkout.commit, sha_width)
-            );
-        }
+        print_checkouts(status, workspace);
     }
+}
+
+/// One row per repo of the project, so a repo without a worktree stands out.
+fn print_checkouts(status: &Status, workspace: &WorkspaceStatus) {
+    let checkout_of = |key: &str| workspace.checkouts.iter().find(|c| c.repo == key);
+    let readable = || workspace.checkouts.iter().filter(|c| c.commit.is_some());
+    let labels: Vec<String> = status
+        .repos
+        .iter()
+        .map(|repo| repo_label(&repo.key, repo.alias.as_deref()))
+        .collect();
+    let label_width = max_width(labels.iter().map(String::as_str));
+    let branch_width = max_width(readable().map(branch_label));
+    let sha_width = sha_width(readable().filter_map(|c| c.commit.as_ref()));
+    let workspace_branch = workspace
+        .checkouts
+        .iter()
+        .find_map(|c| c.branch.as_deref())
+        .unwrap_or("<branch>");
+    for (repo, label) in status.repos.iter().zip(labels) {
+        let detail = match checkout_of(&repo.key) {
+            None => format!("no worktree: add it with `octok branch {workspace_branch}`"),
+            Some(checkout) => match &checkout.commit {
+                Some(commit) => format!(
+                    "{:branch_width$}  {}",
+                    branch_label(checkout),
+                    commit_line(commit, sha_width)
+                ),
+                None => format!(
+                    "cannot be read: {}",
+                    last_line(checkout.error.as_deref().unwrap_or_default())
+                ),
+            },
+        };
+        println!("    {label:label_width$}  {detail}");
+    }
+}
+
+fn branch_label(checkout: &Checkout) -> &str {
+    checkout.branch.as_deref().unwrap_or("(detached)")
 }
 
 fn print_orphan_caches(status: &Status) {
@@ -230,13 +252,9 @@ fn project_repo_label(project: &Project, key: &str) -> String {
     repo_label(key, alias)
 }
 
-fn status_repo_label(status: &Status, key: &str) -> String {
-    let alias = status
-        .repos
-        .iter()
-        .find(|repo| repo.key == key)
-        .and_then(|repo| repo.alias.as_deref());
-    repo_label(key, alias)
+/// The tool's own message: octok's summary of the failed command comes before it.
+fn last_line(error: &str) -> &str {
+    error.lines().last().unwrap_or_default()
 }
 
 /// git abbreviates hashes to different lengths depending on the repo.
