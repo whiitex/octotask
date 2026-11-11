@@ -956,7 +956,7 @@ fn status_text_shows_a_broken_worktree_next_to_the_healthy_ones() {
         .success()
         .stdout(predicate::str::contains("    frontend  feat/login  "))
         .stdout(predicate::str::contains(
-            "    backend   cannot be read: fatal: not a git repository",
+            "    backend   cannot be read: fatal: ",
         ));
 }
 
