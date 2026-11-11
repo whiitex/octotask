@@ -72,6 +72,12 @@ impl Cache {
         Ok(created)
     }
 
+    /// Sets the url of `origin` without fetching.
+    pub(crate) fn point_to(&self, url: &str) -> Result<()> {
+        let _lock = self.lock()?;
+        self.git().set_origin_url(url)
+    }
+
     /// Deletes the cache and its lock file.
     pub(crate) fn remove(&self) -> Result<()> {
         let _lock = self.lock()?;

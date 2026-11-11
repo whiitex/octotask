@@ -3,11 +3,11 @@ mod utils;
 use std::io::{self, IsTerminal};
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use octotask_core::{
-    Error, Home, NewRepo, Registry, Result, create_workspace, fetch_repos, locate_workspace,
-    pull_workspace, register_repo, remove_project, remove_workspace, status, unregister_repo,
-    workspace_name, workspace_path,
+    Error, Home, NewRepo, Registry, RepoChanges, Result, create_workspace, fetch_repos,
+    locate_workspace, pull_workspace, register_repo, remove_project, remove_workspace, status,
+    unregister_repo, update_repo, workspace_name, workspace_path,
 };
 
 use utils::{
@@ -83,6 +83,12 @@ enum ProjectCommand {
     },
     /// Set the default project
     Use { name: String },
+    /// Change the settings of the project
+    Set {
+        /// Default base branch for the project's repos
+        #[arg(long, required = true)]
+        base: String,
+    },
     /// Delete a project, its list of repos and their clones
     Rm { name: String },
 }
@@ -107,8 +113,54 @@ enum RepoCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Change the alias, the base branch or the url of a repo
+    Set {
+        /// Key or alias of the repo
+        repo: String,
+        #[command(flatten)]
+        changes: RepoSetArgs,
+    },
     /// Unregister a repo, given by key or alias, and delete its clone
     Rm { key: String },
+}
+
+#[derive(Args)]
+#[group(required = true, multiple = true)]
+struct RepoSetArgs {
+    /// Short name accepted wherever the key is, e.g. `frontend`
+    #[arg(long, conflicts_with = "no_alias")]
+    alias: Option<String>,
+    /// Remove the alias
+    #[arg(long)]
+    no_alias: bool,
+    /// Base branch for this repo, overriding the project's
+    #[arg(long, conflicts_with = "no_base")]
+    base: Option<String>,
+    /// Go back to the project's base branch
+    #[arg(long)]
+    no_base: bool,
+    /// New git url: the clone is fetched from it
+    #[arg(long)]
+    url: Option<String>,
+}
+
+impl RepoSetArgs {
+    fn changes(&self) -> RepoChanges<'_> {
+        RepoChanges {
+            alias: optional_change(self.alias.as_deref(), self.no_alias),
+            base: optional_change(self.base.as_deref(), self.no_base),
+            url: self.url.as_deref(),
+        }
+    }
+}
+
+/// `--x <value>` sets, `--no-x` clears, neither leaves the setting alone.
+fn optional_change(value: Option<&str>, clear: bool) -> Option<Option<&str>> {
+    match (value, clear) {
+        (Some(value), _) => Some(Some(value)),
+        (None, true) => Some(None),
+        (None, false) => None,
+    }
 }
 
 fn main() -> ExitCode {
@@ -127,6 +179,9 @@ fn run(cli: Cli) -> Result<ExitCode> {
     let explicit_project = cli.project.as_deref();
     let resolve_project = || registry.resolve_project(explicit_project);
     match cli.command {
+        Command::Project(ProjectCommand::Set { base }) => {
+            set_project_base(&registry, &resolve_project()?, &base)?
+        }
         Command::Project(cmd) => project(&registry, cmd)?,
         Command::Repo(cmd) => repo(&registry, &resolve_project()?, cmd)?,
         Command::Fetch => return fetch(&registry, &resolve_project()?),
@@ -176,6 +231,7 @@ fn project(registry: &Registry, cmd: ProjectCommand) -> Result<()> {
             registry.set_default_project(&name)?;
             println!("default project: {name}");
         }
+        ProjectCommand::Set { .. } => unreachable!("handled by `run`, which knows the project"),
         ProjectCommand::Rm { name } => {
             remove_project(registry, &name)?;
             println!("removed project `{name}`");
@@ -206,10 +262,44 @@ fn repo(registry: &Registry, project_name: &str, cmd: RepoCommand) -> Result<()>
             println!("added `{label}` to {project_name}: {url}");
         }
         RepoCommand::Ls { json } => print_repos(&registry.load_project(project_name)?, json),
+        RepoCommand::Set { repo, changes } => {
+            let key = update_repo(
+                registry,
+                project_name,
+                &repo,
+                &changes.changes(),
+                confirm_missing_base,
+            )?;
+            let project = registry.load_project(project_name)?;
+            let label = repo_label(&key, project.repos[&key].alias.as_deref());
+            println!("updated `{label}` in {project_name}");
+        }
         RepoCommand::Rm { key } => {
             let key = unregister_repo(registry, project_name, &key)?;
             println!("removed `{key}` from {project_name}");
         }
+    }
+    Ok(())
+}
+
+fn set_project_base(registry: &Registry, project_name: &str, base: &str) -> Result<()> {
+    let project = registry.update_project(project_name, |project| {
+        project.set_base(base)?;
+        Ok(project.clone())
+    })?;
+    println!("base of `{project_name}` is now `{base}`");
+    // From the last fetch, without the network: enough for a hint.
+    let without_base: Vec<String> = status(registry.home(), &project)?
+        .repos
+        .into_iter()
+        .filter(|repo| repo.cached && repo.commit.is_none())
+        .map(|repo| repo.key)
+        .collect();
+    if !without_base.is_empty() {
+        eprintln!(
+            "warning: branch `{base}` is not on the remote of: {}",
+            without_base.join(", ")
+        );
     }
     Ok(())
 }
