@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use super::utils::run_checked;
+use super::utils::{Place, run_checked};
 use crate::Result;
 
 const PROGRAM: &str = "gh";
@@ -18,6 +18,6 @@ impl Gh {
 
     /// Runs `gh <args>` and returns its stdout. Any non-zero exit is an error.
     pub fn run(&self, args: &[&str]) -> Result<String> {
-        run_checked(PROGRAM, &self.dir, args)
+        run_checked(PROGRAM, Place::local(&self.dir), args)
     }
 }

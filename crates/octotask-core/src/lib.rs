@@ -7,12 +7,13 @@ mod home;
 mod utils;
 mod workspaces;
 
-pub use adapters::{Commit, Gh, Git};
-pub use config::{Project, Registry, Repo, repo_key_from_url};
+pub use adapters::{Commit, Gh, Git, Ssh, resolve_location};
+pub use config::{Location, Project, Registry, Repo, WorkspaceSettings, repo_key_from_url};
 pub use error::{Error, Result};
 pub use home::Home;
 pub use workspaces::{
     Checkout, NewRepo, NewWorkspace, PullOutcome, RepoChanges, RepoStatus, Status, WorkspaceStatus,
     create_workspace, fetch_repos, locate_workspace, pull_workspace, register_repo, remove_project,
-    remove_workspace, status, unregister_repo, update_repo, workspace_name, workspace_path,
+    remove_workspace, set_project_location, status, unregister_repo, update_repo, workspace_name,
+    workspace_path,
 };

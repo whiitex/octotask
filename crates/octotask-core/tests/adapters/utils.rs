@@ -2,14 +2,12 @@
 
 use std::env;
 use std::ffi::OsStr;
-use std::process::Command;
 
 use octotask_core::{Error, Gh, Git};
 use tempfile::TempDir;
 
-use super::init_repo;
+use super::{init_repo, is_child, run_in_child};
 
-const CHILD_MARKER: &str = "OCTOTASK_TEST_CHILD";
 const TARGET_REPO: &str = "OCTOTASK_TEST_TARGET_REPO";
 
 #[test]
@@ -80,6 +78,7 @@ fn git_dir_of_the_caller_does_not_redirect_git() {
     let other_git_dir = other.path().join(".git");
 
     run_in_child(
+        module_path!(),
         "git_dir_of_the_caller_does_not_redirect_git",
         &[
             ("GIT_DIR", other_git_dir.as_os_str()),
@@ -104,6 +103,7 @@ fn git_runs_with_terminal_prompts_disabled() {
         return;
     }
     run_in_child(
+        module_path!(),
         "git_runs_with_terminal_prompts_disabled",
         &[("GIT_TERMINAL_PROMPT", OsStr::new("1"))],
     );
@@ -124,32 +124,8 @@ fn missing_binaries_are_reported_by_name() {
         return;
     }
     run_in_child(
+        module_path!(),
         "missing_binaries_are_reported_by_name",
         &[("PATH", OsStr::new("/nonexistent"))],
-    );
-}
-
-fn is_child() -> bool {
-    env::var_os(CHILD_MARKER).is_some()
-}
-
-/// Runs one test of this file again, in a child copy of the test binary with `vars` added,
-/// so the environment change cannot leak into tests running in parallel.
-/// The child takes the test's `is_child()` branch.
-fn run_in_child(test_name: &str, vars: &[(&str, &OsStr)]) {
-    let module = module_path!()
-        .split_once("::")
-        .map_or("", |(_crate, module)| module);
-    let output = Command::new(env::current_exe().unwrap())
-        .args([format!("{module}::{test_name}").as_str(), "--exact"])
-        .env(CHILD_MARKER, "1")
-        .envs(vars.iter().copied())
-        .output()
-        .unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        output.status.success() && stdout.contains("test result: ok. 1 passed"),
-        "child run of {test_name} failed:\n{stdout}{}",
-        String::from_utf8_lossy(&output.stderr)
     );
 }
