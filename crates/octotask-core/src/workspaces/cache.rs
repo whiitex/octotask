@@ -1,34 +1,28 @@
 use std::fs::{self, File};
-use std::io::{self, ErrorKind, IsTerminal};
+use std::io::{self, IsTerminal};
 use std::path::PathBuf;
 
-use crate::utils::{lock_exclusive, remove_dir_if_present};
-use crate::{Error, Git, Home, Project, Result};
+use crate::adapters::Files;
+use crate::utils::lock_exclusive;
+use crate::{Git, Home, Location, Project, Repo, Result};
 
 /// Caches left behind by repos that are no longer in the project file, e.g. after renaming a key by hand.
 pub(crate) fn orphan_caches(home: &Home, project: &Project) -> Result<Vec<PathBuf>> {
-    let dir = home.caches_dir(&project.name);
-    let entries = match fs::read_dir(&dir) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(source) => return Err(Error::Io { path: dir, source }),
-    };
     let mut orphans = Vec::new();
-    for entry in entries {
-        let path = entry
-            .map_err(|source| Error::Io {
-                path: dir.clone(),
-                source,
-            })?
-            .path();
-        let is_cache = path.is_dir() && path.extension().is_some_and(|ext| ext == "git");
-        let is_registered = path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .is_some_and(|key| project.repos.contains_key(key));
-        if is_cache && !is_registered {
-            orphans.push(path);
-        }
+    for location in project.locations() {
+        let dir = home.at(&location).caches_dir(&project.name);
+        let caches = Files::new(&location)
+            .entries(&dir)?
+            .into_iter()
+            .filter(|entry| entry.is_dir)
+            .filter_map(|entry| {
+                let key = entry
+                    .name
+                    .strip_suffix(".git")
+                    .filter(|key| !key.is_empty())?;
+                (!project.repos.contains_key(key)).then(|| location.shown(&dir.join(&entry.name)))
+            });
+        orphans.extend(caches);
     }
     orphans.sort();
     Ok(orphans)
@@ -36,24 +30,33 @@ pub(crate) fn orphan_caches(home: &Home, project: &Project) -> Result<Vec<PathBu
 
 /// The bare clone of one repo, shared by every workspace of its project.
 pub(crate) struct Cache {
+    location: Location,
     dir: PathBuf,
+    /// On this machine, whatever the location: it serializes the octok processes that run here.
     lock_file: PathBuf,
 }
 
 impl Cache {
-    pub(crate) fn new(home: &Home, project: &str, repo: &str) -> Self {
+    /// The cache of a repo where the project keeps it, whatever the workspace.
+    pub(crate) fn of_repo(home: &Home, project: &Project, key: &str, repo: &Repo) -> Self {
+        let location = project.effective_location(repo, None);
+        Self::new(home, location, &project.name, key)
+    }
+
+    pub(crate) fn new(home: &Home, location: &Location, project: &str, repo: &str) -> Self {
         Self {
-            dir: home.cache_dir(project, repo),
+            location: location.clone(),
+            dir: home.at(location).cache_dir(project, repo),
             lock_file: home.cache_lock_file(project, repo),
         }
     }
 
     pub(crate) fn git(&self) -> Git {
-        Git::new(&self.dir)
+        Git::at(&self.location, &self.dir)
     }
 
-    pub(crate) fn exists(&self) -> bool {
-        self.dir.is_dir()
+    pub(crate) fn exists(&self) -> Result<bool> {
+        self.files().is_dir(&self.dir)
     }
 
     /// Serializes octok processes that write to this cache. Not reentrant.
@@ -81,14 +84,14 @@ impl Cache {
     /// Deletes the cache and its lock file.
     pub(crate) fn remove(&self) -> Result<()> {
         let _lock = self.lock()?;
-        remove_dir_if_present(&self.dir)?;
+        self.files().remove_dir_all(&self.dir)?;
         // Still held: a process already waiting on it gets the lock next, on a cache that is gone.
         let _ = fs::remove_file(&self.lock_file);
         Ok(())
     }
 
     fn ensure_locked(&self, url: &str) -> Result<bool> {
-        if self.exists() {
+        if self.exists()? {
             // The url may have changed in the project file since the clone.
             self.git().set_origin_url(url)?;
             // Caches cloned by an older octok lack it.
@@ -105,16 +108,16 @@ impl Cache {
         let staging = self
             .dir
             .with_extension(format!("tmp-{}", std::process::id()));
-        fs::create_dir_all(&staging).map_err(|source| self.io_error(source))?;
-        let git = Git::new(&staging);
+        self.files().create_dir_all(&staging)?;
+        let git = Git::at(&self.location, &staging);
         let cloned = git
             .init_bare()
             .and_then(|()| git.add_origin(url))
             .and_then(|()| git.push_new_branches_to_origin())
             .and_then(|()| fetch_whole_history(&git))
-            .and_then(|()| fs::rename(&staging, &self.dir).map_err(|source| self.io_error(source)));
+            .and_then(|()| self.files().rename(&staging, &self.dir));
         if cloned.is_err() {
-            let _ = fs::remove_dir_all(&staging);
+            let _ = self.files().remove_dir_all(&staging);
         }
         cloned
     }
@@ -126,27 +129,23 @@ impl Cache {
             return Ok(());
         };
         let prefix = format!("{}.tmp-", stem.to_string_lossy());
-        let Ok(entries) = fs::read_dir(parent) else {
+        let Ok(entries) = self.files().entries(parent) else {
             return Ok(());
         };
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let is_staging = name
-                .to_str()
-                .and_then(|name| name.strip_prefix(&prefix))
+        for entry in entries {
+            let is_staging = entry
+                .name
+                .strip_prefix(&prefix)
                 .is_some_and(|pid| !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit()));
             if is_staging {
-                fs::remove_dir_all(entry.path()).map_err(|source| self.io_error(source))?;
+                self.files().remove_dir_all(&parent.join(&entry.name))?;
             }
         }
         Ok(())
     }
 
-    fn io_error(&self, source: io::Error) -> Error {
-        Error::Io {
-            path: self.dir.clone(),
-            source,
-        }
+    fn files(&self) -> Files<'_> {
+        Files::new(&self.location)
     }
 }
 

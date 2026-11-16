@@ -1,4 +1,7 @@
+use std::env;
+use std::ffi::OsString;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -9,14 +12,54 @@ use tempfile::TempDir;
 struct Env {
     dir: TempDir,
     remotes: TempDir,
+    /// Another machine, reached as any host through the fake `ssh` of the core tests:
+    /// a folder of this one.
+    machine: TempDir,
 }
 
 impl Env {
     fn new() -> Self {
-        Self {
+        let env = Self {
             dir: TempDir::new().unwrap(),
             remotes: TempDir::new().unwrap(),
-        }
+            machine: TempDir::new().unwrap(),
+        };
+        let bin = env.machine_dir().join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        fs::create_dir_all(env.machine_home()).unwrap();
+        install(
+            &bin.join("ssh"),
+            include_str!("../../octotask-core/tests/fixtures/ssh"),
+        );
+        install(
+            &bin.join("ssh-add"),
+            include_str!("../../octotask-core/tests/fixtures/ssh-add"),
+        );
+        env
+    }
+
+    fn machine_dir(&self) -> PathBuf {
+        self.machine.path().canonicalize().unwrap()
+    }
+
+    /// Home of the user on the other machine. The space and the quote make every path
+    /// there need quoting.
+    fn machine_home(&self) -> PathBuf {
+        self.machine_dir().join("remote user's home")
+    }
+
+    /// The octok home on the other machine.
+    fn machine_root(&self) -> PathBuf {
+        self.machine_home().join(".octotask")
+    }
+
+    /// The location octok saves for the other machine reached as `host`.
+    fn machine_location(&self, host: &str) -> String {
+        format!("{host}:{}", self.machine_root().display())
+    }
+
+    fn machine_file(&self, name: &str) -> PathBuf {
+        self.machine_dir().join(name)
     }
 
     fn remote_dir(&self, name: &str) -> PathBuf {
@@ -72,8 +115,17 @@ impl Env {
     }
 
     fn octok(&self, args: &[&str]) -> Command {
+        let mut path = OsString::from(self.machine_dir().join("bin"));
+        path.push(":");
+        path.push(env::var_os("PATH").unwrap_or_default());
         let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("octok"));
-        cmd.env("OCTOTASK_HOME", self.dir.path()).args(args);
+        cmd.env("OCTOTASK_HOME", self.dir.path())
+            .env("PATH", path)
+            .env("FAKE_SSH_HOME", self.machine_home())
+            .env("FAKE_SSH_LOG", self.machine_file("ssh.log"))
+            .env("FAKE_SSH_CONFIG", self.machine_file("ssh.config"))
+            .env("FAKE_SSH_ADD_LOG", self.machine_file("ssh-add.log"))
+            .args(args);
         cmd
     }
 
@@ -120,6 +172,11 @@ fn git(dir: &Path, args: &[&str]) -> String {
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8(output.stdout).unwrap().trim().to_string()
+}
+
+fn install(path: &Path, script: &str) {
+    fs::write(path, script).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
 fn commit(dir: &Path, message: &str) {
@@ -176,8 +233,8 @@ fn registered_repos_are_persisted_in_project_file() {
     assert_eq!(
         ls["repos"],
         serde_json::json!([
-            {"key": "frontend", "alias": null, "url": env.remote_url("frontend"), "base": "develop"},
-            {"key": "agent", "alias": null, "url": env.remote_url("financial-agent"), "base": "main"},
+            {"key": "frontend", "alias": null, "url": env.remote_url("frontend"), "base": "develop", "location": "local"},
+            {"key": "agent", "alias": null, "url": env.remote_url("financial-agent"), "base": "main", "location": "local"},
         ])
     );
 }
@@ -354,7 +411,7 @@ fn repo_rm_removes_from_file() {
     assert_eq!(
         env.json(&["repo", "ls", "--json"])["repos"],
         serde_json::json!([
-            {"key": "backend", "alias": null, "url": env.remote_url("backend"), "base": "main"},
+            {"key": "backend", "alias": null, "url": env.remote_url("backend"), "base": "main", "location": "local"},
         ])
     );
     let after_rm = env.read("projects/deeptree.yaml");
@@ -405,7 +462,7 @@ fn repo_add_with_name_accepts_url_whose_last_segment_is_not_a_valid_key() {
     assert_eq!(
         env.json(&["repo", "ls", "--json"])["repos"],
         serde_json::json!([
-            {"key": "dotgithub", "alias": null, "url": env.remote_url(".github"), "base": "main"},
+            {"key": "dotgithub", "alias": null, "url": env.remote_url(".github"), "base": "main", "location": "local"},
         ])
     );
 }
@@ -1042,4 +1099,429 @@ fn project_set_changes_the_base_and_warns_about_repos_without_it() {
 
     assert!(env.read("projects/deeptree.yaml").contains("base: develop"));
     env.octok(&["project", "set"]).assert().code(2);
+}
+
+#[test]
+fn project_init_with_a_location_finds_the_octok_home_on_the_other_machine() {
+    let env = Env::new();
+    env.octok(&["project", "init", "deeptree", "--location", "vm"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(env.machine_location("vm")));
+    assert!(env.machine_root().is_dir());
+
+    env.octok(&["repo", "add", &env.remote("backend")])
+        .assert()
+        .success();
+
+    let repos = env.json(&["repo", "ls", "--json"])["repos"].clone();
+    assert_eq!(repos[0]["location"], env.machine_location("vm"));
+    assert!(
+        env.machine_root()
+            .join("cache/deeptree/backend.git")
+            .is_dir()
+    );
+    assert!(!env.dir.path().join("cache/deeptree/backend.git").exists());
+}
+
+#[test]
+fn a_repo_on_another_machine_is_cloned_there() {
+    let env = Env::with_repos(&["frontend"]);
+    env.octok(&["repo", "add", &env.remote("backend"), "--location", "vm"])
+        .assert()
+        .success()
+        .stdout(predicate::str::ends_with(format!(
+            "cloned at {}\n",
+            env.machine_location("vm")
+        )));
+
+    assert!(
+        env.machine_root()
+            .join("cache/deeptree/backend.git")
+            .is_dir()
+    );
+    assert!(!env.dir.path().join("cache/deeptree/backend.git").exists());
+    assert!(env.dir.path().join("cache/deeptree/frontend.git").is_dir());
+    let repos = env.json(&["repo", "ls", "--json"])["repos"].clone();
+    assert_eq!(repos[0]["location"], "local");
+    assert_eq!(repos[1]["location"], env.machine_location("vm"));
+    let table = env.stdout(&["repo", "ls"]);
+    assert!(table.contains(&env.machine_location("vm")), "{table}");
+    let status = env.json(&["status", "--json"]);
+    assert_eq!(status["repos"][1]["location"], env.machine_location("vm"));
+    assert_eq!(status["repos"][1]["cached"], true);
+    assert_eq!(status["repos"][1]["commit"]["subject"], "init");
+}
+
+#[test]
+fn a_machine_that_cannot_be_reached_registers_nothing() {
+    let env = Env::with_repos(&[]);
+    env.octok(&[
+        "repo",
+        "add",
+        &env.remote("backend"),
+        "--location",
+        "unreachable",
+    ])
+    .assert()
+    .code(1)
+    .stderr(predicate::str::contains(
+        "cannot run commands on `unreachable` over ssh",
+    ))
+    .stderr(predicate::str::contains(
+        "octok set-ssh-passphrase unreachable",
+    ));
+
+    assert_eq!(
+        env.json(&["repo", "ls", "--json"])["repos"],
+        serde_json::json!([])
+    );
+}
+
+#[test]
+fn a_workspace_spans_this_machine_and_the_other_one() {
+    let env = Env::with_repos(&["frontend"]);
+    env.octok(&["repo", "add", &env.remote("backend"), "--location", "vm"])
+        .assert()
+        .success();
+    let local = env.workspace_dir("feat-login");
+    let remote = env
+        .machine_root()
+        .join("workspaces/deeptree/feat-login/backend");
+
+    env.octok(&["branch", "feat/login"])
+        .assert()
+        .success()
+        .stdout(format!("{}\n", local.display()))
+        .stderr(predicate::str::contains(format!(
+            "backend: vm:{}",
+            remote.display()
+        )));
+
+    assert_eq!(
+        git(&local.join("frontend"), &["branch", "--show-current"]),
+        "feat/login"
+    );
+    assert_eq!(git(&remote, &["branch", "--show-current"]), "feat/login");
+    assert!(!local.join("backend").exists());
+    let status = env.json(&["status", "--json"]);
+    let checkouts = &status["workspaces"][0]["checkouts"];
+    assert_eq!(
+        checkouts[0]["path"],
+        local.join("frontend").to_str().unwrap()
+    );
+    assert_eq!(checkouts[1]["branch"], "feat/login");
+    assert_eq!(
+        checkouts[1]["path"],
+        format!("vm:{}", remote.display()).as_str()
+    );
+    let text = env.stdout(&["status"]);
+    assert!(text.contains(&format!("vm:{}", remote.display())), "{text}");
+    assert_eq!(
+        env.stdout(&["checkout", "feat/login"]),
+        format!("{}\n", local.display())
+    );
+}
+
+#[test]
+fn pull_and_rm_reach_the_worktrees_on_the_other_machine() {
+    let env = Env::with_repos(&[]);
+    env.octok(&["repo", "add", &env.remote("backend"), "--location", "vm"])
+        .assert()
+        .success();
+    env.octok(&["branch", "feat/login"]).assert().success();
+    let remote = env
+        .machine_root()
+        .join("workspaces/deeptree/feat-login/backend");
+    git(&remote, &["push", "--quiet"]);
+    let origin = env.remote_dir("backend");
+    git(&origin, &["checkout", "--quiet", "feat/login"]);
+    commit(&origin, "more");
+
+    env.octok(&["pull", "feat/login"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("backend  updated"));
+    assert_eq!(git(&remote, &["log", "-1", "--format=%s"]), "more");
+
+    fs::write(remote.join("notes.txt"), "unsaved").unwrap();
+    env.octok(&["rm", "feat/login"])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("backend: uncommitted changes"));
+    assert!(remote.is_dir());
+
+    env.octok(&["rm", "--force", "feat/login"])
+        .assert()
+        .success();
+    assert!(!remote.parent().unwrap().exists());
+    assert_eq!(
+        git(
+            &env.machine_root().join("cache/deeptree/backend.git"),
+            &["branch", "--list"]
+        ),
+        ""
+    );
+    env.octok(&["checkout", "feat/login"]).assert().code(1);
+}
+
+#[test]
+fn a_repo_changes_machine_only_while_no_workspace_uses_it() {
+    let env = Env::with_repos(&["backend"]);
+    let local_cache = env.dir.path().join("cache/deeptree/backend.git");
+    let remote_cache = env.machine_root().join("cache/deeptree/backend.git");
+    env.octok(&["branch", "feat/login"]).assert().success();
+
+    env.octok(&["repo", "set", "backend", "--location", "vm"])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains(
+            "repo `backend` is used by workspaces: feat-login",
+        ));
+    assert!(local_cache.is_dir());
+    assert!(!remote_cache.exists());
+
+    env.octok(&["rm", "feat/login"]).assert().success();
+    env.octok(&["repo", "set", "backend", "--location", "vm"])
+        .assert()
+        .success();
+    assert!(remote_cache.is_dir());
+    assert!(!local_cache.exists());
+    assert_eq!(
+        env.json(&["repo", "ls", "--json"])["repos"][0]["location"],
+        env.machine_location("vm")
+    );
+
+    env.octok(&["repo", "set", "backend", "--no-location"])
+        .assert()
+        .success();
+    assert!(local_cache.is_dir());
+    assert!(!remote_cache.exists());
+    assert_eq!(
+        env.json(&["repo", "ls", "--json"])["repos"][0]["location"],
+        "local"
+    );
+}
+
+#[test]
+fn project_set_location_moves_the_repos_that_follow_the_project() {
+    let env = Env::with_repos(&["backend"]);
+    env.octok(&[
+        "repo",
+        "add",
+        &env.remote("frontend"),
+        "--location",
+        "local",
+    ])
+    .assert()
+    .success();
+    let cache = |root: &Path, repo: &str| root.join(format!("cache/deeptree/{repo}.git"));
+    env.octok(&["branch", "feat/login"]).assert().success();
+
+    env.octok(&["project", "set", "--location", "vm"])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("still has workspaces: feat-login"));
+
+    env.octok(&["rm", "feat/login"]).assert().success();
+    env.octok(&["project", "set", "--location", "vm"])
+        .assert()
+        .success();
+    assert!(cache(&env.machine_root(), "backend").is_dir());
+    assert!(!cache(env.dir.path(), "backend").exists());
+    assert!(cache(env.dir.path(), "frontend").is_dir());
+    assert!(!cache(&env.machine_root(), "frontend").exists());
+
+    env.octok(&["project", "set", "--no-location"])
+        .assert()
+        .success();
+    assert!(cache(env.dir.path(), "backend").is_dir());
+    assert!(!cache(&env.machine_root(), "backend").exists());
+}
+
+#[test]
+fn project_rm_deletes_the_caches_on_every_machine() {
+    let env = Env::with_repos(&["frontend"]);
+    env.octok(&["repo", "add", &env.remote("backend"), "--location", "vm"])
+        .assert()
+        .success();
+
+    env.octok(&["project", "rm", "deeptree"]).assert().success();
+
+    assert!(!env.machine_root().join("cache/deeptree").exists());
+    assert!(!env.dir.path().join("cache/deeptree").exists());
+}
+
+#[test]
+fn project_rm_force_deletes_the_workspaces_and_leaves_nothing_on_the_other_machine() {
+    let env = Env::with_repos(&["frontend"]);
+    env.octok(&["repo", "add", &env.remote("backend"), "--location", "vm"])
+        .assert()
+        .success();
+    env.octok(&["branch", "feat/login"]).assert().success();
+
+    env.octok(&["project", "rm", "--force", "deeptree"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("removed project `deeptree`"));
+
+    assert!(env.project_dir_entries().is_empty());
+    assert!(!env.dir.path().join("cache/deeptree").exists());
+    assert!(!env.workspace_dir("feat-login").exists());
+    assert!(!env.machine_root().exists());
+}
+
+#[test]
+fn project_rm_keeps_the_folders_of_other_projects_on_the_other_machine() {
+    let env = Env::new();
+    for project in ["deeptree", "side"] {
+        env.octok(&["project", "init", project, "--location", "vm"])
+            .assert()
+            .success();
+        env.octok(&["repo", "add", &env.remote(project)])
+            .assert()
+            .success();
+    }
+
+    env.octok(&["project", "rm", "side"]).assert().success();
+
+    assert!(!env.machine_root().join("cache/side").exists());
+    assert!(
+        env.machine_root()
+            .join("cache/deeptree/deeptree.git")
+            .is_dir()
+    );
+}
+
+#[test]
+fn set_ssh_passphrase_hands_the_keys_of_the_hosts_to_ssh_add() {
+    let env = Env::with_repos(&[]);
+    let key = env.machine_file("id_test");
+    fs::write(&key, "a private key").unwrap();
+    fs::write(
+        env.machine_file("ssh.config"),
+        format!("hostname 10.0.0.5\nidentityfile {}\n", key.display()),
+    )
+    .unwrap();
+    let added = || fs::read_to_string(env.machine_file("ssh-add.log")).unwrap_or_default();
+
+    env.octok(&["set-ssh-passphrase"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("no repo on another machine"));
+    assert_eq!(added(), "");
+
+    env.octok(&["repo", "add", &env.remote("backend"), "--location", "vm"])
+        .assert()
+        .success();
+    env.octok(&["set-ssh-passphrase"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "vm: added {} to the ssh agent",
+            key.display()
+        )));
+    assert!(added().trim_end().ends_with(key.to_str().unwrap()));
+    assert!(
+        fs::read_to_string(env.machine_file("ssh.log"))
+            .unwrap()
+            .contains("-G vm\n")
+    );
+
+    env.octok(&["set-ssh-passphrase", "other-host"])
+        .assert()
+        .success();
+    assert!(
+        fs::read_to_string(env.machine_file("ssh.log"))
+            .unwrap()
+            .contains("-G other-host\n")
+    );
+}
+
+#[test]
+fn a_workspace_can_live_whole_on_one_machine() {
+    let env = Env::with_repos(&["frontend"]);
+    env.octok(&["repo", "add", &env.remote("backend"), "--location", "vm"])
+        .assert()
+        .success();
+    let here = env.workspace_dir("feat-here");
+    let there = env.machine_root().join("workspaces/deeptree/feat-there");
+    let local_cache = |repo: &str| env.dir.path().join(format!("cache/deeptree/{repo}.git"));
+    let remote_cache = |repo: &str| {
+        env.machine_root()
+            .join(format!("cache/deeptree/{repo}.git"))
+    };
+
+    env.octok(&["branch", "feat/here", "--location", "local"])
+        .assert()
+        .success()
+        .stdout(format!("{}\n", here.display()));
+    env.octok(&["checkout", "-b", "feat/there", "--location", "vm"])
+        .assert()
+        .success()
+        .stdout(format!("vm:{}\n", there.display()));
+
+    for repo in ["frontend", "backend"] {
+        let branch = ["branch", "--show-current"];
+        assert_eq!(git(&here.join(repo), &branch), "feat/here");
+        assert_eq!(git(&there.join(repo), &branch), "feat/there");
+    }
+    let project_file = env.read("projects/deeptree.yaml");
+    assert!(
+        project_file.contains("workspaces:\n  feat-here:\n    location: local\n  feat-there:\n"),
+        "{project_file}"
+    );
+    let status = env.json(&["status", "--json"]);
+    let workspaces = status["workspaces"].as_array().unwrap();
+    assert_eq!(workspaces.len(), 2);
+    assert_eq!(workspaces[0]["path"], here.to_str().unwrap());
+    assert_eq!(
+        workspaces[1]["path"],
+        format!("vm:{}", there.display()).as_str()
+    );
+    for workspace in workspaces {
+        assert_eq!(workspace["checkouts"].as_array().unwrap().len(), 2);
+    }
+
+    env.octok(&["branch", "feat/here", "--location", "vm"])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains(format!(
+            "workspace `feat-here` already exists at {}",
+            here.display()
+        )));
+
+    env.octok(&["rm", "feat/here"]).assert().success();
+    assert!(!here.exists());
+    assert!(!local_cache("backend").exists());
+    assert!(local_cache("frontend").is_dir());
+    env.octok(&["rm", "feat/there"]).assert().success();
+    assert!(!there.exists());
+    assert!(!remote_cache("frontend").exists());
+    assert!(remote_cache("backend").is_dir());
+    let project_file = env.read("projects/deeptree.yaml");
+    assert!(!project_file.contains("workspaces"), "{project_file}");
+}
+
+#[test]
+fn a_branch_that_fails_forgets_the_location_it_asked_for() {
+    let env = Env::new();
+    env.octok(&["project", "init", "deeptree"])
+        .assert()
+        .success();
+    let url = env.remote_with_branch("frontend", "feat/taken");
+    env.octok(&["repo", "add", &url]).assert().success();
+
+    env.octok(&["branch", "feat/taken", "--location", "vm"])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("already exists on the remote"));
+
+    let project_file = env.read("projects/deeptree.yaml");
+    assert!(!project_file.contains("workspaces"), "{project_file}");
+    assert!(
+        !env.machine_root()
+            .join("cache/deeptree/frontend.git")
+            .exists()
+    );
 }

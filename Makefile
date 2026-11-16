@@ -4,6 +4,9 @@ CARGO ?= $(shell command -v cargo 2>/dev/null || echo $(HOME)/.cargo/bin/cargo)
 # Same resolution as the binary: an empty OCTOTASK_HOME counts as unset.
 DATA_DIR := $(or $(OCTOTASK_HOME),$(HOME)/.octotask)
 
+# The octok of this checkout: an installed one may be older than the project files.
+OCTOK := $(CARGO) run --quiet --locked -p octotask --
+
 .PHONY: format test build install clean-data install-clean
 
 format:
@@ -18,14 +21,22 @@ build:
 install:
 	$(CARGO) install --path crates/octotask-cli --locked
 
+# The projects go first: only octok knows which folders they have on other machines.
+# If one cannot be deleted, this stops before the data folder goes, so its project file is kept.
 clean-data:
-	@printf 'Delete %s? [y/N] ' "$(DATA_DIR)"; \
+	@printf 'Delete %s, and the folders of its projects on other machines? [y/N] ' "$(DATA_DIR)"; \
 	read answer; \
-	if [ "$$answer" = y ]; then \
-		rm -rf "$(DATA_DIR)" && echo "deleted $(DATA_DIR)"; \
-	else \
-		echo aborted; \
-	fi
+	if [ "$$answer" != y ]; then echo aborted; exit 0; fi; \
+	for file in "$(DATA_DIR)"/projects/*.yaml; do \
+		[ -e "$$file" ] || continue; \
+		project=$$(basename "$$file" .yaml); \
+		OCTOTASK_HOME="$(DATA_DIR)" $(OCTOK) project rm --force "$$project" >/dev/null || { \
+			echo "project $$project was not deleted: $(DATA_DIR) is kept"; \
+			exit 1; \
+		}; \
+		echo "deleted project $$project on every machine"; \
+	done; \
+	rm -rf "$(DATA_DIR)" && echo "deleted $(DATA_DIR)"
 
 # Install first, so a failed build leaves the data untouched.
 install-clean: install clean-data

@@ -13,6 +13,8 @@ pub enum Error {
         value: String,
         reason: &'static str,
     },
+    #[error("invalid location `{value}`: {reason}")]
+    InvalidLocation { value: String, reason: &'static str },
     #[error("invalid git url `{0}`")]
     InvalidUrl(String),
     #[error("cannot derive a repo key from `{0}`: choose one with `--name <key>`")]
@@ -91,6 +93,13 @@ pub enum Error {
         #[source]
         source: std::io::Error,
     },
+    #[error(
+        "cannot run commands on `{host}` over ssh{}\n\
+         check that `ssh {host}` connects by itself: a location is what `ssh` takes, `<user>@<host>` or a `Host` of `~/.ssh/config`\n\
+         if its key has a passphrase, run `octok set-ssh-passphrase {host}`",
+        stderr_block(.stderr)
+    )]
+    Ssh { host: String, stderr: String },
     #[error("`{command}` printed `{output}`, which octok does not understand")]
     UnexpectedOutput { command: String, output: String },
     #[error("`{command}` failed in {dir} ({status}){}", stderr_block(.stderr))]

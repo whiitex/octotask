@@ -2,15 +2,16 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use super::utils::{failure, run_captured, run_checked, run_visible};
-use crate::{Error, Result};
+use super::utils::{Place, run_checked, run_query, run_visible};
+use crate::{Error, Location, Result};
 
 const PROGRAM: &str = "git";
 const ORIGIN: &str = "origin";
 
-/// Runs the system `git` inside one directory.
+/// Runs `git` inside one directory, on this machine or on the one of a location.
 #[derive(Debug, Clone)]
 pub struct Git {
+    location: Location,
     dir: PathBuf,
 }
 
@@ -32,24 +33,27 @@ pub fn origin_ref(branch: &str) -> String {
 }
 
 impl Git {
+    /// `git` in a directory of this machine.
     pub fn new(dir: impl Into<PathBuf>) -> Self {
-        Self { dir: dir.into() }
+        Self::at(&Location::Local, dir)
+    }
+
+    pub fn at(location: &Location, dir: impl Into<PathBuf>) -> Self {
+        Self {
+            location: location.clone(),
+            dir: dir.into(),
+        }
     }
 
     /// Runs `git <args>` and returns its stdout. Any non-zero exit is an error.
     pub fn run(&self, args: &[&str]) -> Result<String> {
-        run_checked(PROGRAM, &self.dir, args)
+        run_checked(PROGRAM, self.place(), args)
     }
 
     /// Runs a yes/no query such as `show-ref --verify --quiet`:
     /// exit 0 is `true`, exit 1 is `false`, anything else is an error.
     pub fn check(&self, args: &[&str]) -> Result<bool> {
-        let output = run_captured(PROGRAM, &self.dir, args)?;
-        match output.status.code() {
-            Some(0) => Ok(true),
-            Some(1) => Ok(false),
-            _ => Err(failure(PROGRAM, &self.dir, args, &output)),
-        }
+        run_query(PROGRAM, self.place(), args)
     }
 
     /// Turns the directory into an empty bare repository.
@@ -86,7 +90,7 @@ impl Git {
     pub fn fetch_origin_showing_progress(&self) -> Result<()> {
         run_visible(
             PROGRAM,
-            &self.dir,
+            self.place(),
             &["fetch", "--prune", "--progress", ORIGIN],
         )
     }
@@ -189,5 +193,9 @@ impl Git {
 
     fn ref_exists(&self, full_name: &str) -> Result<bool> {
         self.check(&["show-ref", "--verify", "--quiet", full_name])
+    }
+
+    fn place(&self) -> Place<'_> {
+        Place::machine(&self.location).in_dir(&self.dir)
     }
 }

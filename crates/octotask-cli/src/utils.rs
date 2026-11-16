@@ -4,6 +4,9 @@ use std::process::ExitCode;
 use octotask_core::{Checkout, Commit, Project, PullOutcome, Result, Status, WorkspaceStatus};
 use serde_json::json;
 
+/// How a location on this machine is written.
+const LOCAL: &str = "local";
+
 pub(crate) fn print_projects(projects: &[String], default: Option<&str>, json: bool) {
     if json {
         println!(
@@ -33,6 +36,7 @@ pub(crate) fn print_repos(project: &Project, json: bool) {
             alias: repo.alias.as_deref(),
             url: &repo.url,
             base: project.effective_base(repo),
+            location: project.effective_location(repo, None).to_string(),
         })
         .collect();
     if json {
@@ -116,12 +120,21 @@ struct RepoRow<'a> {
     alias: Option<&'a str>,
     url: &'a str,
     base: &'a str,
+    location: String,
 }
 
 fn print_repos_json(project_name: &str, rows: &[RepoRow]) {
     let repos: Vec<_> = rows
         .iter()
-        .map(|row| json!({"key": row.key, "alias": row.alias, "url": row.url, "base": row.base}))
+        .map(|row| {
+            json!({
+                "key": row.key,
+                "alias": row.alias,
+                "url": row.url,
+                "base": row.base,
+                "location": row.location,
+            })
+        })
         .collect();
     println!(
         "{}",
@@ -136,11 +149,21 @@ fn print_repos_table(rows: &[RepoRow]) {
         .collect();
     let label_width = max_width(labels.iter().map(String::as_str));
     let base_width = max_width(rows.iter().map(|row| row.base));
+    // A project that lives on this machine only keeps the table it always had.
+    let all_local = rows.iter().all(|row| row.location == LOCAL);
+    let url_width = max_width(rows.iter().map(|row| row.url));
     for (row, label) in rows.iter().zip(labels) {
-        println!(
-            "{label:label_width$}  {:base_width$}  {}",
-            row.base, row.url
-        );
+        if all_local {
+            println!(
+                "{label:label_width$}  {:base_width$}  {}",
+                row.base, row.url
+            );
+        } else {
+            println!(
+                "{label:label_width$}  {:base_width$}  {:url_width$}  {}",
+                row.base, row.url, row.location
+            );
+        }
     }
 }
 
@@ -175,8 +198,13 @@ fn print_status_repos(status: &Status) {
             None if repo.cached => format!("branch `{}` is not on the remote", repo.base),
             None => "not fetched (run `octok fetch`)".to_string(),
         };
+        let place = if repo.location == LOCAL {
+            String::new()
+        } else {
+            format!("  [{}]", repo.location)
+        };
         println!(
-            "  {label:label_width$}  {:base_width$}  {commit}",
+            "  {label:label_width$}  {:base_width$}  {commit}{place}",
             repo.base
         );
     }
@@ -216,9 +244,10 @@ fn print_checkouts(status: &Status, workspace: &WorkspaceStatus) {
             None => format!("no worktree: add it with `octok branch {workspace_branch}`"),
             Some(checkout) => match &checkout.commit {
                 Some(commit) => format!(
-                    "{:branch_width$}  {}",
+                    "{:branch_width$}  {}{}",
                     branch_label(checkout),
-                    commit_line(commit, sha_width)
+                    commit_line(commit, sha_width),
+                    place_elsewhere(workspace, checkout)
                 ),
                 None => format!(
                     "cannot be read: {}",
@@ -227,6 +256,16 @@ fn print_checkouts(status: &Status, workspace: &WorkspaceStatus) {
             },
         };
         println!("    {label:label_width$}  {detail}");
+    }
+}
+
+/// The path of a worktree that is not under the folder shown for its workspace:
+/// it lives on another machine.
+fn place_elsewhere(workspace: &WorkspaceStatus, checkout: &Checkout) -> String {
+    if checkout.path.starts_with(&workspace.path) {
+        String::new()
+    } else {
+        format!("  [{}]", checkout.path.display())
     }
 }
 

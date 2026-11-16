@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::{Error, Result};
+use crate::{Error, Location, Result};
 
 /// Root of all `octok` state on disk (`~/.octotask` by default, overridable with `OCTOTASK_HOME`).
 #[derive(Debug, Clone)]
@@ -22,6 +22,18 @@ impl Home {
         }
     }
 
+    /// The octok home on the machine of `location`.
+    pub fn at(&self, location: &Location) -> Self {
+        match location {
+            Location::Local => self.clone(),
+            Location::Remote { root, .. } => Self::new(root),
+        }
+    }
+
+    pub fn root(&self) -> PathBuf {
+        self.root.clone()
+    }
+
     pub fn projects_dir(&self) -> PathBuf {
         self.root.join("projects")
     }
@@ -38,8 +50,12 @@ impl Home {
         self.root.join("registry.lock")
     }
 
+    pub fn caches_root(&self) -> PathBuf {
+        self.root.join("cache")
+    }
+
     pub fn caches_dir(&self, project: &str) -> PathBuf {
-        self.root.join("cache").join(project)
+        self.caches_root().join(project)
     }
 
     /// Bare clone shared by every workspace of the project.

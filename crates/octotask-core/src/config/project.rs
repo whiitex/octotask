@@ -1,8 +1,11 @@
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
+use super::location::Location;
 use crate::utils::CONFIG_VERSION;
 use crate::{Error, Result};
+
+static LOCAL: Location = Location::Local;
 
 /// A project: the set of repos that make up one product, plus their default base branch.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -11,8 +14,14 @@ pub struct Project {
     pub version: u32,
     pub name: String,
     pub base: String,
+    /// Where the repos live unless they say otherwise. `None` is this machine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<Location>,
     #[serde(default)]
     pub repos: IndexMap<String, Repo>,
+    /// Settings of the workspaces that have any, by workspace name.
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub workspaces: IndexMap<String, WorkspaceSettings>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -24,6 +33,16 @@ pub struct Repo {
     pub url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
+    /// Where this repo lives, overriding the project's location.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<Location>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceSettings {
+    /// Where every repo of the workspace lives, whatever the repos and the project say.
+    pub location: Location,
 }
 
 impl Project {
@@ -34,7 +53,9 @@ impl Project {
             version: CONFIG_VERSION,
             name: name.to_string(),
             base: base.to_string(),
+            location: None,
             repos: IndexMap::new(),
+            workspaces: IndexMap::new(),
         })
     }
 
@@ -74,6 +95,7 @@ impl Project {
                 alias: None,
                 url: url.trim().to_string(),
                 base: base.map(str::to_string),
+                location: None,
             },
         );
         Ok(key)
@@ -119,6 +141,36 @@ impl Project {
         Ok(())
     }
 
+    /// Sets where the repos live unless they say otherwise. `None` is this machine.
+    pub fn set_location(&mut self, location: Option<Location>) {
+        self.location = location;
+    }
+
+    /// Sets where one repo lives. `None` goes back to the project's location.
+    pub fn set_repo_location(&mut self, key: &str, location: Option<Location>) -> Result<()> {
+        self.repo_mut(key)?.location = location;
+        Ok(())
+    }
+
+    /// Sets where every repo of one workspace lives. `None` goes back to each repo's location.
+    pub fn set_workspace_location(
+        &mut self,
+        workspace: &str,
+        location: Option<Location>,
+    ) -> Result<()> {
+        validate_workspace_name(workspace)?;
+        match location {
+            Some(location) => {
+                let settings = WorkspaceSettings { location };
+                self.workspaces.insert(workspace.to_string(), settings);
+            }
+            None => {
+                self.workspaces.shift_remove(workspace);
+            }
+        }
+        Ok(())
+    }
+
     /// Key of the repo that `name` refers to, as a key or as an alias.
     pub fn resolve_repo(&self, name: &str) -> Result<&str> {
         self.repos
@@ -139,10 +191,49 @@ impl Project {
         repo.base.as_deref().unwrap_or(&self.base)
     }
 
+    /// Where a repo lives: the override of the workspace, else its own location,
+    /// else the project's, else this machine.
+    pub fn effective_location<'a>(
+        &'a self,
+        repo: &'a Repo,
+        workspace: Option<&str>,
+    ) -> &'a Location {
+        workspace
+            .and_then(|name| self.workspaces.get(name))
+            .map(|settings| &settings.location)
+            .or(repo.location.as_ref())
+            .or(self.location.as_ref())
+            .unwrap_or(&LOCAL)
+    }
+
+    /// Every machine the project can have folders on, each one once, the project's own first.
+    pub fn locations(&self) -> Vec<Location> {
+        let project = self.location.as_ref().unwrap_or(&LOCAL);
+        let repos = self
+            .repos
+            .values()
+            .filter_map(|repo| repo.location.as_ref());
+        let workspaces = self.workspaces.values().map(|settings| &settings.location);
+        let mut locations: Vec<Location> = Vec::new();
+        for location in std::iter::once(project).chain(repos).chain(workspaces) {
+            if !locations.contains(location) {
+                locations.push(location.clone());
+            }
+        }
+        locations
+    }
+
     /// Checks invariants that serde cannot express, e.g. after loading a hand-edited file.
     pub(crate) fn validate(&self) -> Result<()> {
         validate_ident("project name", &self.name)?;
         validate_branch(&self.base)?;
+        if let Some(location) = &self.location {
+            location.validate()?;
+        }
+        for (name, settings) in &self.workspaces {
+            validate_workspace_name(name)?;
+            settings.location.validate()?;
+        }
         for (key, repo) in &self.repos {
             validate_ident("repo key", key)?;
             validated_url_path(&repo.url)?;
@@ -152,6 +243,9 @@ impl Project {
             if let Some(alias) = &repo.alias {
                 validate_ident("alias", alias)?;
                 self.ensure_alias_is_free(key, alias)?;
+            }
+            if let Some(location) = &repo.location {
+                location.validate()?;
             }
         }
         Ok(())
@@ -253,6 +347,22 @@ pub(crate) fn validate_ident(kind: &'static str, value: &str) -> Result<()> {
         return fail("may only contain letters, digits, `.`, `_` and `-`");
     }
     Ok(())
+}
+
+/// A workspace is named after its branch, with `/` replaced: the name is one folder.
+fn validate_workspace_name(value: &str) -> Result<()> {
+    let reason = if value.is_empty() {
+        "must not be empty"
+    } else if value.contains('/') {
+        "must not contain `/`"
+    } else {
+        return Ok(());
+    };
+    Err(Error::InvalidName {
+        kind: "workspace name",
+        value: value.to_string(),
+        reason,
+    })
 }
 
 /// A cheap subset of `git check-ref-format --branch`, enough to catch typos early.

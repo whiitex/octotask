@@ -1,4 +1,4 @@
-use octotask_core::{Error, Project, repo_key_from_url};
+use octotask_core::{Error, Location, Project, repo_key_from_url};
 
 #[test]
 fn repo_key_is_derived_from_common_url_forms() {
@@ -333,4 +333,107 @@ fn project_base_can_be_changed() {
     p.set_base("develop").unwrap();
 
     assert_eq!(p.effective_base(&p.repos["DeepTreeDashboard"]), "develop");
+}
+
+fn remote_location(host: &str) -> Location {
+    format!("{host}:/home/ubuntu/.octotask").parse().unwrap()
+}
+
+#[test]
+fn location_falls_back_from_workspace_to_repo_to_project_to_local() {
+    let mut project = Project::new("deeptree", "main").unwrap();
+    project
+        .add_repo("git@github.com:org/frontend.git", None, None)
+        .unwrap();
+    project
+        .add_repo("git@github.com:org/backend.git", None, None)
+        .unwrap();
+    let location = |project: &Project, key: &str, workspace: Option<&str>| {
+        project
+            .effective_location(&project.repos[key], workspace)
+            .clone()
+    };
+    assert_eq!(location(&project, "backend", None), Location::Local);
+
+    project.set_location(Some(remote_location("project-vm")));
+    assert_eq!(
+        location(&project, "backend", None),
+        remote_location("project-vm")
+    );
+
+    project
+        .set_repo_location("backend", Some(remote_location("repo-vm")))
+        .unwrap();
+    project
+        .set_repo_location("frontend", Some(Location::Local))
+        .unwrap();
+    assert_eq!(
+        location(&project, "backend", None),
+        remote_location("repo-vm")
+    );
+    assert_eq!(location(&project, "frontend", None), Location::Local);
+
+    project
+        .set_workspace_location("feat-login", Some(remote_location("workspace-vm")))
+        .unwrap();
+    for key in ["frontend", "backend"] {
+        assert_eq!(
+            location(&project, key, Some("feat-login")),
+            remote_location("workspace-vm")
+        );
+    }
+    assert_eq!(
+        location(&project, "backend", Some("feat-other")),
+        remote_location("repo-vm")
+    );
+
+    project.set_workspace_location("feat-login", None).unwrap();
+    assert_eq!(
+        location(&project, "backend", Some("feat-login")),
+        remote_location("repo-vm")
+    );
+    project.set_repo_location("backend", None).unwrap();
+    assert_eq!(
+        location(&project, "backend", None),
+        remote_location("project-vm")
+    );
+}
+
+#[test]
+fn locations_lists_each_machine_of_the_project_once() {
+    let mut project = Project::new("deeptree", "main").unwrap();
+    assert_eq!(project.locations(), [Location::Local]);
+
+    for name in ["frontend", "backend", "agent"] {
+        project
+            .add_repo(&format!("git@github.com:org/{name}.git"), None, None)
+            .unwrap();
+    }
+    project
+        .set_repo_location("backend", Some(remote_location("vm")))
+        .unwrap();
+    project
+        .set_repo_location("agent", Some(remote_location("vm")))
+        .unwrap();
+    project
+        .set_workspace_location("feat-login", Some(remote_location("other-vm")))
+        .unwrap();
+
+    assert_eq!(
+        project.locations(),
+        [
+            Location::Local,
+            remote_location("vm"),
+            remote_location("other-vm")
+        ]
+    );
+}
+
+#[test]
+fn location_of_an_unknown_repo_is_refused() {
+    let mut project = Project::new("deeptree", "main").unwrap();
+    let err = project
+        .set_repo_location("nope", Some(Location::Local))
+        .unwrap_err();
+    assert!(matches!(err, Error::RepoNotFound(_)), "{err:?}");
 }

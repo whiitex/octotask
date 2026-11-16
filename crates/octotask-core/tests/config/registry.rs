@@ -420,3 +420,58 @@ fn alias_is_written_only_when_set_and_checked_on_load() {
     let err = reg.load_project("deeptree").unwrap_err();
     assert!(matches!(err, Error::DuplicateAlias { .. }), "{err:?}");
 }
+
+#[test]
+fn locations_are_written_only_when_set_and_survive_a_reload() {
+    let (_dir, reg) = registry();
+    reg.init_project("deeptree", "main").unwrap();
+    reg.update_project("deeptree", |p| {
+        p.add_repo("git@github.com:org/frontend.git", None, None)?;
+        p.add_repo("git@github.com:org/backend.git", None, None)
+    })
+    .unwrap();
+    let path = reg.home().project_file("deeptree");
+    let raw = fs::read_to_string(&path).unwrap();
+    assert!(!raw.contains("location"), "{raw}");
+    assert!(!raw.contains("workspaces"), "{raw}");
+
+    let vm: octotask_core::Location = "api-dev-1:/home/ubuntu/.octotask".parse().unwrap();
+    reg.update_project("deeptree", |p| {
+        p.set_location(Some(vm.clone()));
+        p.set_repo_location("frontend", Some(octotask_core::Location::Local))?;
+        p.set_workspace_location("feat-login", Some(vm.clone()))
+    })
+    .unwrap();
+
+    let raw = fs::read_to_string(&path).unwrap();
+    assert!(
+        raw.contains("\nlocation: api-dev-1:/home/ubuntu/.octotask\n"),
+        "{raw}"
+    );
+    assert!(raw.contains("    location: local\n"), "{raw}");
+    assert!(
+        raw.contains(
+            "workspaces:\n  feat-login:\n    location: api-dev-1:/home/ubuntu/.octotask\n"
+        ),
+        "{raw}"
+    );
+    let loaded = reg.load_project("deeptree").unwrap();
+    assert_eq!(loaded.location, Some(vm.clone()));
+    assert_eq!(
+        loaded.effective_location(&loaded.repos["backend"], Some("feat-login")),
+        &vm
+    );
+}
+
+#[test]
+fn a_hand_edited_location_is_checked_on_load() {
+    let (_dir, reg) = registry();
+    reg.init_project("deeptree", "main").unwrap();
+    let path = reg.home().project_file("deeptree");
+    let raw = fs::read_to_string(&path).unwrap();
+    fs::write(&path, format!("{raw}location: api-dev-1\n")).unwrap();
+
+    let err = reg.load_project("deeptree").unwrap_err();
+    assert!(matches!(err, Error::Parse { .. }), "{err:?}");
+    assert!(err.to_string().contains("api-dev-1"), "{err}");
+}
