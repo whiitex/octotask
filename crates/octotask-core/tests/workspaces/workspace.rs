@@ -5,7 +5,9 @@ use octotask_core::{
     register_repo, remove_workspace, status, workspace_path,
 };
 
-use super::{Fixture, PROJECT, commit_here, commit_on, git, head, refuse_missing_base};
+use super::{
+    Fixture, PROJECT, commit_here, commit_on, git, head, keep_project_base, refuse_missing_base,
+};
 
 fn fixture_with_repos(names: &[&str]) -> Fixture {
     let fx = Fixture::new();
@@ -26,6 +28,7 @@ fn create_workspace_adds_one_worktree_per_repo_on_a_new_branch_from_the_latest_b
             ..Default::default()
         },
         refuse_missing_base,
+        keep_project_base,
     )
     .unwrap();
     let backend = fx.remote("backend");
@@ -39,6 +42,7 @@ fn create_workspace_adds_one_worktree_per_repo_on_a_new_branch_from_the_latest_b
             ..Default::default()
         },
         refuse_missing_base,
+        keep_project_base,
     )
     .unwrap();
     // Pushed after the clone: only a fetch at creation time can see them.
@@ -178,7 +182,14 @@ fn create_workspace_reports_a_base_branch_missing_on_the_remote() {
         base: Some("develop"),
         ..Default::default()
     };
-    register_repo(&fx.registry(), PROJECT, &repo, |_, _| true).unwrap();
+    register_repo(
+        &fx.registry(),
+        PROJECT,
+        &repo,
+        |_, _| true,
+        keep_project_base,
+    )
+    .unwrap();
 
     let err = create_workspace(&fx.registry(), PROJECT, "feat/login", None).unwrap_err();
 
@@ -306,6 +317,7 @@ fn pull_workspace_skips_repos_without_a_worktree_or_a_branch() {
             ..Default::default()
         },
         refuse_missing_base,
+        keep_project_base,
     )
     .unwrap();
 
@@ -387,6 +399,7 @@ fn status_reports_aliases_and_caches_missing_from_the_project() {
             ..Default::default()
         },
         refuse_missing_base,
+        keep_project_base,
     )
     .unwrap();
     // A key renamed by hand in the project file leaves its old cache behind.
@@ -413,7 +426,14 @@ fn status_tells_a_missing_base_branch_from_a_missing_cache() {
         base: Some("develop"),
         ..Default::default()
     };
-    register_repo(&fx.registry(), PROJECT, &repo, |_, _| true).unwrap();
+    register_repo(
+        &fx.registry(),
+        PROJECT,
+        &repo,
+        |_, _| true,
+        keep_project_base,
+    )
+    .unwrap();
 
     let status = status(&fx.home(), &fx.project()).unwrap();
 

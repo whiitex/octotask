@@ -223,3 +223,29 @@ fn a_host_without_key_files_has_no_passphrase_to_remember() {
         "a_host_without_key_files_has_no_passphrase_to_remember",
     );
 }
+
+#[test]
+fn settings_are_what_ssh_resolves_for_the_host() {
+    if is_child() {
+        let key = fake_remote_path("HOME").join(".ssh/id_test");
+        fs::create_dir_all(key.parent().unwrap()).unwrap();
+        fs::write(&key, "a private key").unwrap();
+        fs::write(
+            fake_remote_path(FakeRemote::CONFIG),
+            "hostname 10.0.0.5\nuser ubuntu\nport 2222\nidentityfile ~/.ssh/id_test\nidentityfile ~/.ssh/missing\n",
+        )
+        .unwrap();
+
+        let settings = Ssh::new("vm").unwrap().settings().unwrap();
+
+        assert_eq!(settings.hostname, "10.0.0.5");
+        assert_eq!(settings.user, "ubuntu");
+        assert_eq!(settings.port, "2222");
+        assert_eq!(settings.keys, [key]);
+        return;
+    }
+    FakeRemote::new().run_in_child(
+        module_path!(),
+        "settings_are_what_ssh_resolves_for_the_host",
+    );
+}

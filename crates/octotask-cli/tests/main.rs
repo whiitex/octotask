@@ -7,6 +7,8 @@ use std::process::{Command, Stdio};
 
 use assert_cmd::prelude::*;
 use predicates::prelude::*;
+use rexpect::process::WaitStatus;
+use rexpect::session::{PtySession, spawn_command};
 use tempfile::TempDir;
 
 struct Env {
@@ -89,7 +91,7 @@ impl Env {
     /// A project named `deeptree` with one cloned repo per name.
     fn with_repos(names: &[&str]) -> Self {
         let env = Self::new();
-        env.octok(&["project", "init", "deeptree"])
+        env.octok(&["project", "init", "deeptree", "--base", "main"])
             .assert()
             .success();
         for name in names {
@@ -143,6 +145,39 @@ impl Env {
         fs::read_to_string(self.dir.path().join(relative_path)).unwrap()
     }
 
+    /// Runs `octok` at a terminal, where it asks for what the flags leave out.
+    fn terminal(&self, args: &[&str]) -> PtySession {
+        let mut octok = self.octok(args);
+        octok.env("HOME", self.terminal_home());
+        spawn_command(octok, Some(TERMINAL_TIMEOUT_MS)).unwrap()
+    }
+
+    /// Home of the user at the terminal, so the tests never read the real `~/.ssh/config`.
+    fn terminal_home(&self) -> PathBuf {
+        self.machine_file("local home")
+    }
+
+    fn write_ssh_config(&self, text: &str) {
+        let ssh_dir = self.terminal_home().join(".ssh");
+        fs::create_dir_all(&ssh_dir).unwrap();
+        fs::write(ssh_dir.join("config"), text).unwrap();
+    }
+
+    /// The other machine as `ssh -G` describes it, with one key file.
+    fn describe_machine_to_ssh(&self) -> PathBuf {
+        let key = self.machine_file("id_test");
+        fs::write(&key, "a private key").unwrap();
+        fs::write(
+            self.machine_file("ssh.config"),
+            format!(
+                "hostname 10.0.0.5\nuser ubuntu\nport 2222\nidentityfile {}\n",
+                key.display()
+            ),
+        )
+        .unwrap();
+        key
+    }
+
     fn project_dir_entries(&self) -> Vec<String> {
         let mut names: Vec<String> = fs::read_dir(self.dir.path().join("projects"))
             .unwrap()
@@ -154,6 +189,25 @@ impl Env {
 }
 
 const COMMIT_DATE: &str = "2020-01-01T00:00:00Z";
+
+const TERMINAL_TIMEOUT_MS: u64 = 20_000;
+
+/// Types `line` once `octok` has asked `question`.
+fn answer(terminal: &mut PtySession, question: &str, line: &str) {
+    terminal.exp_string(question).unwrap();
+    terminal.send_line(line).unwrap();
+}
+
+/// Waits for `octok` to end well and returns what it still printed.
+fn finish(mut terminal: PtySession) -> String {
+    let printed = terminal.exp_eof().unwrap();
+    let status = terminal.process().wait().unwrap();
+    assert!(
+        matches!(status, WaitStatus::Exited(_, 0)),
+        "{status:?}: {printed}"
+    );
+    printed
+}
 
 /// Runs plain `git`, independently of the binary under test, and returns its trimmed stdout.
 fn git(dir: &Path, args: &[&str]) -> String {
@@ -177,6 +231,27 @@ fn git(dir: &Path, args: &[&str]) -> String {
 fn install(path: &Path, script: &str) {
     fs::write(path, script).unwrap();
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// An empty commit on a new `branch`, made at `date`.
+fn commit_on_new_branch(dir: &Path, branch: &str, date: &str) {
+    git(dir, &["checkout", "--quiet", "-b", branch]);
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args([
+            "-c",
+            "user.name=octok",
+            "-c",
+            "user.email=octok@example.com",
+        ])
+        .args(["-c", "commit.gpgsign=false", "commit", "--allow-empty"])
+        .args(["--no-verify", "--quiet", "--message", branch])
+        .env("GIT_AUTHOR_DATE", date)
+        .env("GIT_COMMITTER_DATE", date)
+        .status()
+        .unwrap();
+    assert!(status.success());
 }
 
 fn commit(dir: &Path, message: &str) {
@@ -242,10 +317,12 @@ fn registered_repos_are_persisted_in_project_file() {
 #[test]
 fn repo_commands_target_default_project_unless_overridden() {
     let env = Env::new();
-    env.octok(&["project", "init", "deeptree"])
+    env.octok(&["project", "init", "deeptree", "--base", "main"])
         .assert()
         .success();
-    env.octok(&["project", "init", "side"]).assert().success();
+    env.octok(&["project", "init", "side", "--base", "main"])
+        .assert()
+        .success();
     env.octok(&["repo", "add", &env.remote("tool")])
         .assert()
         .success();
@@ -271,10 +348,10 @@ fn repo_commands_target_default_project_unless_overridden() {
 #[test]
 fn project_init_announces_the_new_default() {
     let env = Env::new();
-    env.octok(&["project", "init", "deeptree"])
+    env.octok(&["project", "init", "deeptree", "--base", "main"])
         .assert()
         .success();
-    env.octok(&["project", "init", "side"])
+    env.octok(&["project", "init", "side", "--base", "main"])
         .assert()
         .success()
         .stdout(predicate::str::contains(
@@ -285,10 +362,12 @@ fn project_init_announces_the_new_default() {
 #[test]
 fn project_rm_of_another_project_keeps_the_default() {
     let env = Env::new();
-    env.octok(&["project", "init", "deeptree"])
+    env.octok(&["project", "init", "deeptree", "--base", "main"])
         .assert()
         .success();
-    env.octok(&["project", "init", "side"]).assert().success();
+    env.octok(&["project", "init", "side", "--base", "main"])
+        .assert()
+        .success();
 
     env.octok(&["project", "rm", "deeptree"])
         .assert()
@@ -306,10 +385,12 @@ fn project_rm_of_another_project_keeps_the_default() {
 #[test]
 fn project_rm_of_the_default_leaves_no_default() {
     let env = Env::new();
-    env.octok(&["project", "init", "deeptree"])
+    env.octok(&["project", "init", "deeptree", "--base", "main"])
         .assert()
         .success();
-    env.octok(&["project", "init", "side"]).assert().success();
+    env.octok(&["project", "init", "side", "--base", "main"])
+        .assert()
+        .success();
 
     env.octok(&["project", "rm", "side"])
         .assert()
@@ -338,8 +419,12 @@ fn project_rm_of_the_default_leaves_no_default() {
 #[test]
 fn project_ls_reports_default() {
     let env = Env::new();
-    env.octok(&["project", "init", "zeta"]).assert().success();
-    env.octok(&["project", "init", "alpha"]).assert().success();
+    env.octok(&["project", "init", "zeta", "--base", "main"])
+        .assert()
+        .success();
+    env.octok(&["project", "init", "alpha", "--base", "main"])
+        .assert()
+        .success();
     let ls = env.json(&["project", "ls", "--json"]);
     assert_eq!(ls["schema"], 1);
     assert_eq!(ls["projects"], serde_json::json!(["alpha", "zeta"]));
@@ -354,8 +439,12 @@ fn project_ls_text_marks_default() {
         .success()
         .stdout("no projects yet: create one with `octok project init <name>`\n");
 
-    env.octok(&["project", "init", "zeta"]).assert().success();
-    env.octok(&["project", "init", "alpha"]).assert().success();
+    env.octok(&["project", "init", "zeta", "--base", "main"])
+        .assert()
+        .success();
+    env.octok(&["project", "init", "alpha", "--base", "main"])
+        .assert()
+        .success();
     env.octok(&["project", "ls"])
         .assert()
         .success()
@@ -396,7 +485,7 @@ fn repo_ls_text_aligns_columns_and_shows_effective_base() {
 #[test]
 fn repo_rm_removes_from_file() {
     let env = Env::new();
-    env.octok(&["project", "init", "deeptree"])
+    env.octok(&["project", "init", "deeptree", "--base", "main"])
         .assert()
         .success();
     env.octok(&["repo", "add", &env.remote("frontend")])
@@ -429,7 +518,7 @@ fn repo_rm_removes_from_file() {
 fn concurrent_repo_adds_are_all_saved() {
     const REPOS: usize = 24;
     let env = Env::new();
-    env.octok(&["project", "init", "deeptree"])
+    env.octok(&["project", "init", "deeptree", "--base", "main"])
         .assert()
         .success();
 
@@ -452,7 +541,7 @@ fn concurrent_repo_adds_are_all_saved() {
 #[test]
 fn repo_add_with_name_accepts_url_whose_last_segment_is_not_a_valid_key() {
     let env = Env::new();
-    env.octok(&["project", "init", "deeptree"])
+    env.octok(&["project", "init", "deeptree", "--base", "main"])
         .assert()
         .success();
     env.octok(&["repo", "add", &env.remote(".github"), "--name", "dotgithub"])
@@ -470,7 +559,7 @@ fn repo_add_with_name_accepts_url_whose_last_segment_is_not_a_valid_key() {
 #[test]
 fn repo_add_without_name_asks_for_one_when_no_key_can_be_derived() {
     let env = Env::new();
-    env.octok(&["project", "init", "deeptree"])
+    env.octok(&["project", "init", "deeptree", "--base", "main"])
         .assert()
         .success();
     let before = env.read("projects/deeptree.yaml");
@@ -490,7 +579,7 @@ fn newer_global_config_is_rejected_and_left_untouched() {
     let config = env.dir.path().join("config.yaml");
     fs::write(&config, "version: 99\n").unwrap();
 
-    env.octok(&["project", "init", "deeptree"])
+    env.octok(&["project", "init", "deeptree", "--base", "main"])
         .assert()
         .code(1)
         .stderr(predicate::str::contains(
@@ -509,7 +598,7 @@ fn errors_exit_1_with_message_and_change_nothing() {
         .code(1)
         .stderr(predicate::str::contains("default project"));
 
-    env.octok(&["project", "init", "deeptree"])
+    env.octok(&["project", "init", "deeptree", "--base", "main"])
         .assert()
         .success();
     env.octok(&["repo", "add", "not-a-url"])
@@ -649,7 +738,9 @@ fn pull_uses_the_workspace_of_the_current_directory() {
     let worktree = env.workspace_dir("feat-login").join("frontend");
 
     // Another default project must not matter: the directory decides.
-    env.octok(&["project", "init", "side"]).assert().success();
+    env.octok(&["project", "init", "side", "--base", "main"])
+        .assert()
+        .success();
     env.octok(&["pull"])
         .current_dir(&worktree)
         .assert()
@@ -992,7 +1083,7 @@ fn project_rm_is_refused_with_workspaces_and_then_deletes_the_caches() {
     assert!(!env.dir.path().join("cache/deeptree").exists());
 
     // A new project with the same name starts empty.
-    env.octok(&["project", "init", "deeptree"])
+    env.octok(&["project", "init", "deeptree", "--base", "main"])
         .assert()
         .success();
     env.octok(&["status"]).assert().success().stdout(
@@ -1104,10 +1195,18 @@ fn project_set_changes_the_base_and_warns_about_repos_without_it() {
 #[test]
 fn project_init_with_a_location_finds_the_octok_home_on_the_other_machine() {
     let env = Env::new();
-    env.octok(&["project", "init", "deeptree", "--location", "vm"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains(env.machine_location("vm")));
+    env.octok(&[
+        "project",
+        "init",
+        "deeptree",
+        "--base",
+        "main",
+        "--location",
+        "vm",
+    ])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains(env.machine_location("vm")));
     assert!(env.machine_root().is_dir());
 
     env.octok(&["repo", "add", &env.remote("backend")])
@@ -1375,9 +1474,17 @@ fn project_rm_force_deletes_the_workspaces_and_leaves_nothing_on_the_other_machi
 fn project_rm_keeps_the_folders_of_other_projects_on_the_other_machine() {
     let env = Env::new();
     for project in ["deeptree", "side"] {
-        env.octok(&["project", "init", project, "--location", "vm"])
-            .assert()
-            .success();
+        env.octok(&[
+            "project",
+            "init",
+            project,
+            "--base",
+            "main",
+            "--location",
+            "vm",
+        ])
+        .assert()
+        .success();
         env.octok(&["repo", "add", &env.remote(project)])
             .assert()
             .success();
@@ -1506,7 +1613,7 @@ fn a_workspace_can_live_whole_on_one_machine() {
 #[test]
 fn a_branch_that_fails_forgets_the_location_it_asked_for() {
     let env = Env::new();
-    env.octok(&["project", "init", "deeptree"])
+    env.octok(&["project", "init", "deeptree", "--base", "main"])
         .assert()
         .success();
     let url = env.remote_with_branch("frontend", "feat/taken");
@@ -1524,4 +1631,275 @@ fn a_branch_that_fails_forgets_the_location_it_asked_for() {
             .join("cache/deeptree/frontend.git")
             .exists()
     );
+}
+
+#[test]
+fn repo_add_at_a_terminal_asks_for_what_the_flags_leave_out() {
+    let env = Env::new();
+    env.octok(&["project", "init", "deeptree", "--base", "main"])
+        .assert()
+        .success();
+    let url = env.remote_with_branch("frontend", "develop");
+    let origin = env.remote_dir("frontend");
+    git(&origin, &["branch", "Staging"]);
+    for year in 2021..=2026 {
+        commit_on_new_branch(
+            &origin,
+            &format!("feat/{year}"),
+            &format!("{year}-06-01T00:00:00Z"),
+        );
+    }
+    git(&origin, &["checkout", "--quiet", "main"]);
+
+    let mut terminal = env.terminal(&["repo", "add", &url]);
+    answer(&mut terminal, "Alias [frontend]: ", "fe");
+    answer(&mut terminal, "Location [local, project default]: ", "");
+    terminal
+        .exp_string(
+            "Branches on the remote:\r\n  main (default)\r\n  Staging\r\n  develop\r\n  \
+             feat/2026\r\n  feat/2025\r\n  feat/2024\r\n  feat/2023\r\n  feat/2022\r\n  \
+             ... and 1 more\r\n",
+        )
+        .unwrap();
+    answer(
+        &mut terminal,
+        "Base branch [main, project default]: ",
+        "develop",
+    );
+    let printed = finish(terminal);
+
+    assert!(
+        printed.contains("added `frontend (fe)` to deeptree"),
+        "{printed}"
+    );
+    let repos: serde_json::Value =
+        serde_json::from_str(&env.stdout(&["repo", "ls", "--json"])).unwrap();
+    assert_eq!(repos["repos"][0]["key"], "frontend");
+    assert_eq!(repos["repos"][0]["alias"], "fe");
+    assert_eq!(repos["repos"][0]["base"], "develop");
+    assert_eq!(repos["repos"][0]["location"], "local");
+}
+
+#[test]
+fn repo_add_at_a_terminal_with_enter_on_everything_saves_what_the_flags_would() {
+    let asked = Env::new();
+    let plain = Env::new();
+    for env in [&asked, &plain] {
+        env.octok(&["project", "init", "deeptree", "--base", "main"])
+            .assert()
+            .success();
+    }
+    let url = asked.remote("frontend");
+
+    let mut terminal = asked.terminal(&["repo", "add", &url]);
+    for question in ["Alias [frontend]: ", "Location [", "Base branch ["] {
+        answer(&mut terminal, question, "");
+    }
+    finish(terminal);
+    plain.octok(&["repo", "add", &url]).assert().success();
+
+    assert_eq!(
+        asked.read("projects/deeptree.yaml"),
+        plain.read("projects/deeptree.yaml")
+    );
+}
+
+#[test]
+fn repo_add_at_a_terminal_asks_again_after_an_answer_it_cannot_use() {
+    let env = Env::with_repos(&["frontend"]);
+    let key = env.describe_machine_to_ssh();
+    let url = env.remote("backend");
+    env.write_ssh_config("Host vm other-vm\nHost *.internal\n");
+
+    let mut terminal = env.terminal(&["repo", "add", &url]);
+    answer(&mut terminal, "Alias [backend]: ", "frontend");
+    terminal
+        .exp_string("alias `frontend` is already used")
+        .unwrap();
+    answer(&mut terminal, "Alias [backend]: ", "backend");
+    terminal
+        .exp_string("Machines in ~/.ssh/config:\r\n  vm\r\n  other-vm\r\n")
+        .unwrap();
+    answer(
+        &mut terminal,
+        "Location [local, project default]: ",
+        "unreachable",
+    );
+    terminal
+        .exp_string("cannot run commands on `unreachable` over ssh")
+        .unwrap();
+    answer(&mut terminal, "Location [local, project default]: ", "vm");
+    terminal
+        .exp_string(&format!(
+            "ssh reaches `vm` as ubuntu@10.0.0.5, port 2222, key {}",
+            key.display()
+        ))
+        .unwrap();
+    answer(
+        &mut terminal,
+        "Base branch [main, project default]: ",
+        "not a branch",
+    );
+    terminal
+        .exp_string("invalid branch `not a branch`")
+        .unwrap();
+    answer(&mut terminal, "Base branch [main, project default]: ", "");
+    let printed = finish(terminal);
+
+    assert!(printed.contains("added `backend` to deeptree"), "{printed}");
+    assert!(
+        env.machine_root()
+            .join("cache/deeptree/backend.git")
+            .is_dir()
+    );
+    let log = fs::read_to_string(env.machine_file("ssh.log")).unwrap();
+    assert!(log.contains("for-each-ref"), "{log}");
+}
+
+#[test]
+fn repo_add_at_a_terminal_never_asks_for_the_name() {
+    let env = Env::with_repos(&["frontend"]);
+    let url = env.remote_url("frontend");
+
+    let mut terminal = env.terminal(&["repo", "add", &url]);
+    let printed = terminal.exp_eof().unwrap();
+    assert!(
+        printed.contains("repo `frontend` is already registered"),
+        "{printed}"
+    );
+    assert!(printed.contains("--name"), "{printed}");
+    assert!(!printed.contains("]: "), "{printed}");
+
+    let mut terminal = env.terminal(&["repo", "add", &url, "--name", "second"]);
+    for question in ["Alias [second]: ", "Location [", "Base branch ["] {
+        answer(&mut terminal, question, "");
+    }
+    let printed = finish(terminal);
+    assert!(printed.contains("added `second` to deeptree"), "{printed}");
+}
+
+#[test]
+fn repo_add_at_a_terminal_with_every_flag_asks_nothing() {
+    let env = Env::new();
+    env.octok(&["project", "init", "deeptree", "--base", "main"])
+        .assert()
+        .success();
+    let url = env.remote("frontend");
+
+    let terminal = env.terminal(&[
+        "repo",
+        "add",
+        &url,
+        "--name",
+        "dashboard",
+        "--alias",
+        "fe",
+        "--base",
+        "main",
+        "--location",
+        "local",
+    ]);
+    let printed = finish(terminal);
+
+    assert!(!printed.contains("]: "), "{printed}");
+    assert!(
+        printed.contains("added `dashboard (fe)` to deeptree"),
+        "{printed}"
+    );
+}
+
+#[test]
+fn repo_add_at_a_terminal_asks_before_using_a_base_missing_on_the_remote() {
+    let env = Env::new();
+    env.octok(&["project", "init", "deeptree", "--base", "main"])
+        .assert()
+        .success();
+    let url = env.remote("frontend");
+    let flags = ["--name", "frontend", "--alias", "fe", "--location", "local"];
+    let add = |base: &str| {
+        let mut args = vec!["repo", "add", url.as_str(), "--base", base];
+        args.extend(flags);
+        env.terminal(&args)
+    };
+
+    let mut terminal = add("develop");
+    answer(&mut terminal, "Use it as base anyway? [y/N] ", "n");
+    terminal
+        .exp_string("has no branch `develop` on its remote")
+        .unwrap();
+    terminal.exp_eof().unwrap();
+    assert!(!env.read("projects/deeptree.yaml").contains("frontend"));
+
+    let mut terminal = add("develop");
+    answer(&mut terminal, "Use it as base anyway? [y/N] ", "y");
+    finish(terminal);
+    assert!(env.read("projects/deeptree.yaml").contains("base: develop"));
+}
+
+#[test]
+fn project_init_at_a_terminal_asks_for_the_base_and_the_location() {
+    let env = Env::new();
+    env.describe_machine_to_ssh();
+
+    env.write_ssh_config("Host vm\n");
+
+    let mut terminal = env.terminal(&["project", "init", "deeptree"]);
+    answer(&mut terminal, "Base branch [staging]: ", "not a branch");
+    terminal
+        .exp_string("invalid branch `not a branch`")
+        .unwrap();
+    answer(&mut terminal, "Base branch [staging]: ", "");
+    terminal
+        .exp_string("Machines in ~/.ssh/config:\r\n  vm\r\n")
+        .unwrap();
+    answer(&mut terminal, "Location [local]: ", "vm");
+    terminal
+        .exp_string("ssh reaches `vm` as ubuntu@10.0.0.5")
+        .unwrap();
+    let printed = finish(terminal);
+
+    assert!(
+        printed.contains("created project `deeptree` (base: staging)"),
+        "{printed}"
+    );
+    assert!(
+        printed.contains(&format!("its repos live at {}", env.machine_location("vm"))),
+        "{printed}"
+    );
+    assert!(env.machine_root().is_dir());
+}
+
+#[test]
+fn project_init_at_a_terminal_with_every_flag_asks_nothing() {
+    let env = Env::new();
+
+    let terminal = env.terminal(&[
+        "project",
+        "init",
+        "deeptree",
+        "--base",
+        "main",
+        "--location",
+        "local",
+    ]);
+    let printed = finish(terminal);
+
+    assert!(!printed.contains("]: "), "{printed}");
+    assert!(printed.contains("(base: main)"), "{printed}");
+}
+
+#[test]
+fn project_init_without_a_terminal_uses_staging_and_this_machine() {
+    let env = Env::new();
+
+    env.octok(&["project", "init", "deeptree"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "created project `deeptree` (base: staging)",
+        ));
+
+    let project = env.read("projects/deeptree.yaml");
+    assert!(project.contains("base: staging"), "{project}");
+    assert!(!project.contains("location"), "{project}");
 }

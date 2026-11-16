@@ -25,8 +25,8 @@ $ octok status
 project: shop
 
 repos:
-  shop-frontend (frontend)  main  4f2a91c  Add cart page (2 days ago)
-  shop-backend (backend)    main  a81d0e3  Fix order totals (5 hours ago)
+  shop-frontend (frontend)  staging  4f2a91c  Add cart page (2 days ago)
+  shop-backend (backend)    staging  a81d0e3  Fix order totals (5 hours ago)
 
 workspaces:
   feat-login  /Users/you/.octotask/workspaces/shop/feat-login
@@ -78,7 +78,7 @@ A project is a named group of repositories with a default base branch.
 
 | Command | What it does |
 |---|---|
-| `octok project init <name> [--base <branch>] [--location <location>]` | Creates a project and makes it the default. The base branch defaults to `main`, the location to this machine. |
+| `octok project init <name> [--base <branch>] [--location <location>]` | Creates a project and makes it the default. The base branch defaults to `staging`, the location to this machine. |
 | `octok project ls [--json]` | Lists the projects and marks the default one with `*`. |
 | `octok project use <name>` | Sets the default project. |
 | `octok project set --base <branch>` | Changes the base branch of the project, and warns about the repositories that do not have it. |
@@ -105,6 +105,41 @@ The options of `octok repo set` can be combined in one command.
 
 When a base branch is not on the remote, `octok` asks for confirmation before using it.
 Without a terminal, for example in a script, it refuses instead.
+
+### Questions at a terminal
+
+At a terminal, `octok project init` and `octok repo add` ask for each setting that has no flag, and show its default between brackets.
+Press Enter to keep the default.
+An answer that cannot be used is explained and asked again.
+
+```console
+$ octok repo add git@github.com:acme/shop-backend.git
+Alias [shop-backend]: backend
+Machines in ~/.ssh/config:
+  api-dev-1
+  bastion
+Location [local, project default]: api-dev-1
+ssh reaches `api-dev-1` as ubuntu@10.0.0.5, port 22, key /Users/you/.ssh/id_ed25519
+Branches on the remote:
+  main (default)
+  staging
+  feat/checkout
+  fix/order-totals
+Base branch [staging, project default]:
+added `shop-backend (backend)` to shop: git@github.com:acme/shop-backend.git
+cloned at api-dev-1:/home/ubuntu/.octotask
+```
+
+- `octok project init` asks for the base branch and the location.
+- `octok repo add` asks for the alias, the location and the base branch.
+  Enter on the alias saves no alias, and Enter on the location or the base branch makes the repository follow the project.
+- The name of a repository is never asked: it is the one in the URL, or `--name`.
+- Before the location, `octok` lists the machines `~/.ssh/config` names one by one, the files it includes covered.
+  Patterns such as `*.example.com` are left out.
+- A location on another machine is tried at once, and `octok` shows the user, the address, the port and the key files `ssh` uses for it.
+- The base branch is asked once the repository is cloned, after a list of the branches of its remote:
+  the default branch first, then the staging branch under the names teams use for it (`staging`, `stage`, `stg`, `develop`, `development`, `dev`, `next`, `integration`, `preprod`, `pre-prod`), then the 5 other branches with the most recent commits.
+- With every flag given, or without a terminal, nothing is asked.
 
 ### Workspaces: `octok branch`, `octok checkout`, `octok rm`
 

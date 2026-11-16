@@ -1,6 +1,6 @@
 use super::cache::Cache;
 use super::workspace::workspaces_with_repo;
-use crate::{Error, Home, Location, Project, Registry, Result};
+use crate::{Error, Home, Location, OriginBranches, Project, Registry, Result};
 
 /// What `octok repo add` asks for. `key` defaults to the last path segment of the url,
 /// `base` and `location` to the project's.
@@ -16,18 +16,21 @@ pub struct NewRepo<'a> {
 /// Registers a repo in the project and clones it into the cache.
 /// Nothing is registered when the clone fails. Returns the key the repo was registered under.
 ///
-/// `allow_missing_base` is asked, with the repo key and the branch, whether to go on
-/// when the base branch is not on the remote.
+/// Both questions come after the clone, when the remote is known:
+/// - `allow_missing_base` is asked, with the repo key and the branch, whether to go on
+///   when the base branch is not on the remote;
+/// - `choose_base` is asked, with the repo key and the branches of the remote, which base
+///   to use when `repo.base` leaves it open. `None` keeps the base of the project.
 pub fn register_repo(
     registry: &Registry,
     project_name: &str,
     repo: &NewRepo,
     allow_missing_base: impl FnOnce(&str, &str) -> bool,
+    choose_base: impl FnOnce(&str, &OriginBranches) -> Option<String>,
 ) -> Result<String> {
     // On a throwaway copy: validates the input and resolves the key before the slow clone.
     let mut draft = registry.load_project(project_name)?;
     let key = add_to_project(&mut draft, repo)?;
-    let base = draft.effective_base(&draft.repos[&key]);
     let cache = Cache::of_repo(registry.home(), &draft, &key, &draft.repos[&key]);
     let discard = |created: bool| {
         if created {
@@ -37,22 +40,27 @@ pub fn register_repo(
     let created = cache
         .fetch(repo.url.trim())
         .inspect_err(|_| discard(matches!(cache.exists(), Ok(false))))?;
-    if !cache.git().origin_branch_exists(base)? && !allow_missing_base(&key, base) {
-        discard(created);
-        return Err(Error::BaseNotFound {
-            repo: key,
-            base: base.to_string(),
-        });
-    }
-    let with_resolved_key = NewRepo {
-        key: Some(&key),
-        ..*repo
+    let register = || {
+        let chosen_base = match repo.base {
+            Some(_) => None,
+            None => choose_base(&key, &cache.git().origin_branches()?),
+        };
+        draft.set_repo_base(&key, chosen_base.as_deref().or(repo.base))?;
+        let base = draft.effective_base(&draft.repos[&key]);
+        if !cache.git().origin_branch_exists(base)? && !allow_missing_base(&key, base) {
+            return Err(Error::BaseNotFound {
+                repo: key.clone(),
+                base: base.to_string(),
+            });
+        }
+        let resolved = NewRepo {
+            key: Some(&key),
+            base: draft.repos[&key].base.as_deref(),
+            ..*repo
+        };
+        registry.update_project(project_name, |project| add_to_project(project, &resolved))
     };
-    registry
-        .update_project(project_name, |project| {
-            add_to_project(project, &with_resolved_key)
-        })
-        .inspect_err(|_| discard(created))
+    register().inspect_err(|_| discard(created))
 }
 
 /// What `octok repo set` changes. A field left to `None` is not touched.

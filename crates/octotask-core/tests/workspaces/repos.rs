@@ -5,7 +5,7 @@ use octotask_core::{
     update_repo,
 };
 
-use super::{Fixture, PROJECT, commit_on, git, head, refuse_missing_base};
+use super::{Fixture, PROJECT, commit_on, git, head, keep_project_base, refuse_missing_base};
 
 #[test]
 fn register_repo_clones_the_remote_into_a_bare_cache() {
@@ -39,6 +39,7 @@ fn register_repo_with_unreachable_url_registers_nothing() {
             ..Default::default()
         },
         refuse_missing_base,
+        keep_project_base,
     )
     .unwrap_err();
 
@@ -66,6 +67,7 @@ fn register_repo_rejects_a_duplicate_key_and_keeps_the_first_cache() {
             ..Default::default()
         },
         refuse_missing_base,
+        keep_project_base,
     )
     .unwrap_err();
 
@@ -108,6 +110,7 @@ fn fetch_repos_clones_a_missing_cache() {
             ..Default::default()
         },
         refuse_missing_base,
+        keep_project_base,
     )
     .unwrap();
     fs::remove_dir_all(fx.cache_dir("frontend")).unwrap();
@@ -152,6 +155,7 @@ fn fetch_repos_follows_a_url_changed_in_the_project_file() {
             ..Default::default()
         },
         refuse_missing_base,
+        keep_project_base,
     )
     .unwrap();
     fx.registry()
@@ -181,6 +185,7 @@ fn unregister_repo_removes_the_entry_and_the_cache() {
             ..Default::default()
         },
         refuse_missing_base,
+        keep_project_base,
     )
     .unwrap();
 
@@ -203,6 +208,7 @@ fn unregister_repo_used_by_a_workspace_is_refused() {
             ..Default::default()
         },
         refuse_missing_base,
+        keep_project_base,
     )
     .unwrap();
     create_workspace(&fx.registry(), PROJECT, "feat/login", None).unwrap();
@@ -240,6 +246,7 @@ fn register_repo_stores_the_alias_and_unregister_repo_accepts_it() {
             ..Default::default()
         },
         refuse_missing_base,
+        keep_project_base,
     )
     .unwrap();
     assert_eq!(
@@ -264,6 +271,7 @@ fn register_repo_checks_the_alias_before_cloning() {
             ..Default::default()
         },
         refuse_missing_base,
+        keep_project_base,
     )
     .unwrap();
     let url = fx.remote("backend");
@@ -277,6 +285,7 @@ fn register_repo_checks_the_alias_before_cloning() {
             ..Default::default()
         },
         refuse_missing_base,
+        keep_project_base,
     )
     .unwrap_err();
 
@@ -295,10 +304,16 @@ fn register_repo_asks_before_using_a_base_missing_on_the_remote() {
     };
     let mut asked = Vec::new();
 
-    let err = register_repo(&fx.registry(), PROJECT, &repo, |key, base| {
-        asked.push((key.to_string(), base.to_string()));
-        false
-    })
+    let err = register_repo(
+        &fx.registry(),
+        PROJECT,
+        &repo,
+        |key, base| {
+            asked.push((key.to_string(), base.to_string()));
+            false
+        },
+        keep_project_base,
+    )
     .unwrap_err();
 
     assert_eq!(asked, [("frontend".to_string(), "develop".to_string())]);
@@ -310,7 +325,14 @@ fn register_repo_asks_before_using_a_base_missing_on_the_remote() {
     assert!(!fx.cache_dir("frontend").exists());
     assert!(!fx.cache_dir("frontend").with_extension("lock").exists());
 
-    register_repo(&fx.registry(), PROJECT, &repo, |_, _| true).unwrap();
+    register_repo(
+        &fx.registry(),
+        PROJECT,
+        &repo,
+        |_, _| true,
+        keep_project_base,
+    )
+    .unwrap();
     assert_eq!(
         fx.project().repos["frontend"].base.as_deref(),
         Some("develop")
@@ -326,9 +348,13 @@ fn register_repo_does_not_ask_when_the_base_exists() {
         ..Default::default()
     };
 
-    register_repo(&fx.registry(), PROJECT, &repo, |_, _| {
-        panic!("the base exists: nothing to ask")
-    })
+    register_repo(
+        &fx.registry(),
+        PROJECT,
+        &repo,
+        |_, _| panic!("the base exists: nothing to ask"),
+        keep_project_base,
+    )
     .unwrap();
 }
 
@@ -455,6 +481,7 @@ fn update_repo_points_the_cache_to_a_new_url() {
             ..Default::default()
         },
         refuse_missing_base,
+        keep_project_base,
     )
     .unwrap();
     let to = |url| RepoChanges {
@@ -492,4 +519,80 @@ fn update_repo_points_the_cache_to_a_new_url() {
         git(&fx.cache_dir("app"), &["remote", "get-url", "origin"]),
         new
     );
+}
+
+#[test]
+fn register_repo_lets_the_caller_choose_the_base_among_the_branches_of_the_remote() {
+    let fx = Fixture::new();
+    let url = fx.remote("frontend");
+    git(&fx.remote_dir("frontend"), &["branch", "staging"]);
+    let repo = NewRepo {
+        url: &url,
+        ..Default::default()
+    };
+    let mut offered = Vec::new();
+
+    register_repo(
+        &fx.registry(),
+        PROJECT,
+        &repo,
+        refuse_missing_base,
+        |key, branches| {
+            assert_eq!(key, "frontend");
+            assert_eq!(branches.default.as_deref(), Some("main"));
+            offered = branches.newest_first.clone();
+            Some("staging".to_string())
+        },
+    )
+    .unwrap();
+
+    offered.sort();
+    assert_eq!(offered, ["main", "staging"]);
+    assert_eq!(
+        fx.project().repos["frontend"].base.as_deref(),
+        Some("staging")
+    );
+}
+
+#[test]
+fn register_repo_offers_no_choice_when_the_base_is_given() {
+    let fx = Fixture::new();
+    let url = fx.remote("frontend");
+    let repo = NewRepo {
+        url: &url,
+        base: Some("main"),
+        ..Default::default()
+    };
+
+    register_repo(
+        &fx.registry(),
+        PROJECT,
+        &repo,
+        refuse_missing_base,
+        |_, _| panic!("the base is given: nothing to choose"),
+    )
+    .unwrap();
+}
+
+#[test]
+fn register_repo_with_a_chosen_base_that_is_not_a_branch_name_registers_nothing() {
+    let fx = Fixture::new();
+    let url = fx.remote("frontend");
+    let repo = NewRepo {
+        url: &url,
+        ..Default::default()
+    };
+
+    let err = register_repo(
+        &fx.registry(),
+        PROJECT,
+        &repo,
+        refuse_missing_base,
+        |_, _| Some("not a branch".to_string()),
+    )
+    .unwrap_err();
+
+    assert!(matches!(err, Error::InvalidName { .. }), "{err:?}");
+    assert!(fx.project().repos.is_empty());
+    assert!(!fx.cache_dir("frontend").exists());
 }
