@@ -7,7 +7,9 @@ mod home;
 mod utils;
 mod workspaces;
 
-pub use adapters::{Commit, Gh, Git, Ssh, resolve_location};
+pub use adapters::{
+    Commit, Gh, Git, OriginBranches, Ssh, SshSettings, resolve_location, ssh_config_hosts,
+};
 pub use config::{Location, Project, Registry, Repo, WorkspaceSettings, repo_key_from_url};
 pub use error::{Error, Result};
 pub use home::Home;

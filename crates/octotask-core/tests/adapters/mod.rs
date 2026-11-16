@@ -3,6 +3,7 @@
 mod gh;
 mod git;
 mod ssh;
+mod ssh_config;
 mod utils;
 
 use std::env;

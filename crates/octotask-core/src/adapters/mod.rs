@@ -4,9 +4,11 @@ mod files;
 mod gh;
 mod git;
 mod ssh;
+mod ssh_config;
 mod utils;
 
 pub(crate) use files::Files;
 pub use gh::Gh;
-pub use git::{Commit, Git, origin_ref};
-pub use ssh::{Ssh, resolve_location};
+pub use git::{Commit, Git, OriginBranches, origin_ref};
+pub use ssh::{Ssh, SshSettings, resolve_location};
+pub use ssh_config::ssh_config_hosts;

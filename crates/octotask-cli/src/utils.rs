@@ -5,7 +5,7 @@ use octotask_core::{Checkout, Commit, Project, PullOutcome, Result, Status, Work
 use serde_json::json;
 
 /// How a location on this machine is written.
-const LOCAL: &str = "local";
+pub(crate) const LOCAL: &str = "local";
 
 pub(crate) fn print_projects(projects: &[String], default: Option<&str>, json: bool) {
     if json {
@@ -91,6 +91,27 @@ pub(crate) fn confirm(question: &str, mut input: impl BufRead, mut output: impl 
         return false;
     }
     matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+}
+
+/// Asks for a value, showing its default, and reads one line.
+/// `None` when the input has ended, an empty text when the answer is just Enter.
+pub(crate) fn ask(
+    question: &str,
+    default: &str,
+    mut input: impl BufRead,
+    mut output: impl Write,
+) -> Option<String> {
+    let asked = if default.is_empty() {
+        write!(output, "{question}: ")
+    } else {
+        write!(output, "{question} [{default}]: ")
+    };
+    asked.and_then(|()| output.flush()).ok()?;
+    let mut answer = String::new();
+    match input.read_line(&mut answer) {
+        Ok(read) if read > 0 => Some(answer.trim().to_string()),
+        _ => None,
+    }
 }
 
 /// How a repo is shown: its key, followed by the alias when it has one.

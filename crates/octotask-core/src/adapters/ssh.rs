@@ -36,6 +36,16 @@ pub struct Ssh {
     host: String,
 }
 
+/// What ssh resolves for a host from `~/.ssh/config`, as `ssh -G` prints it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SshSettings {
+    pub hostname: String,
+    pub user: String,
+    pub port: String,
+    /// The private keys ssh would try, that exist as files.
+    pub keys: Vec<PathBuf>,
+}
+
 impl Ssh {
     /// `host` is what `ssh` takes as its destination: a `Host` of `~/.ssh/config` or `user@host`.
     pub fn new(host: &str) -> Result<Self> {
@@ -49,7 +59,7 @@ impl Ssh {
     /// at the terminal and keeps it: octok never sees it. Returns the keys, none when ssh
     /// uses no key file for this host.
     pub fn remember_passphrase(&self) -> Result<Vec<PathBuf>> {
-        let keys = self.key_files()?;
+        let keys = self.settings()?.keys;
         if keys.is_empty() {
             return Ok(keys);
         }
@@ -92,16 +102,23 @@ impl Ssh {
         }
     }
 
-    /// The private keys ssh would try for this host, as `ssh -G` lists them, that exist as files.
-    fn key_files(&self) -> Result<Vec<PathBuf>> {
+    pub fn settings(&self) -> Result<SshSettings> {
         let config = run_checked(PROGRAM, Place::here(), &["-G", &self.host])?;
-        let keys = config
-            .lines()
-            .filter_map(|line| line.strip_prefix("identityfile "))
-            .map(expand_home)
-            .filter(|key| key.is_file())
-            .collect();
-        Ok(keys)
+        let values = |name: &'static str| {
+            config
+                .lines()
+                .filter_map(move |line| line.strip_prefix(name)?.strip_prefix(' '))
+        };
+        let first = |name| values(name).next().unwrap_or_default().to_string();
+        Ok(SshSettings {
+            hostname: first("hostname"),
+            user: first("user"),
+            port: first("port"),
+            keys: values("identityfile")
+                .map(expand_home)
+                .filter(|key| key.is_file())
+                .collect(),
+        })
     }
 }
 

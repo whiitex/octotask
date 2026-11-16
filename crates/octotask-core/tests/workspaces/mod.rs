@@ -8,7 +8,7 @@ mod workspace;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use octotask_core::{Home, NewRepo, Project, Registry, register_repo};
+use octotask_core::{Home, NewRepo, OriginBranches, Project, Registry, register_repo};
 use tempfile::TempDir;
 
 const PROJECT: &str = "deeptree";
@@ -62,7 +62,14 @@ impl Fixture {
             url,
             ..Default::default()
         };
-        register_repo(&self.registry(), PROJECT, &repo, refuse_missing_base).unwrap()
+        register_repo(
+            &self.registry(),
+            PROJECT,
+            &repo,
+            refuse_missing_base,
+            keep_project_base,
+        )
+        .unwrap()
     }
 
     fn cache_dir(&self, repo: &str) -> PathBuf {
@@ -139,4 +146,9 @@ fn head(dir: &Path, rev: &str) -> String {
 /// Answer to "use a base branch that is not on the remote?" for tests that never expect the question.
 fn refuse_missing_base(_repo: &str, _base: &str) -> bool {
     false
+}
+
+/// Answer to "which base branch?" for tests that leave the choice to the project.
+fn keep_project_base(_repo: &str, _branches: &OriginBranches) -> Option<String> {
+    None
 }

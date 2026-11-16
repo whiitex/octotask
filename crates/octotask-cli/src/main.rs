@@ -1,3 +1,4 @@
+mod prompts;
 mod utils;
 
 use std::io::{self, IsTerminal};
@@ -5,14 +6,18 @@ use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
 use octotask_core::{
-    Error, Home, Location, NewRepo, Project, Registry, RepoChanges, Result, Ssh, create_workspace,
-    fetch_repos, locate_workspace, pull_workspace, register_repo, remove_project, remove_workspace,
-    resolve_location, set_project_location, status, unregister_repo, update_repo, workspace_name,
-    workspace_path,
+    Error, Home, Location, NewRepo, OriginBranches, Project, Registry, RepoChanges, Result, Ssh,
+    create_workspace, fetch_repos, locate_workspace, pull_workspace, register_repo, remove_project,
+    remove_workspace, resolve_location, set_project_location, status, unregister_repo, update_repo,
+    workspace_name, workspace_path,
 };
 
+use prompts::{
+    DEFAULT_BASE, RepoSettings, ask_location, ask_project_base, ask_repo_base, ask_repo_settings,
+};
 use utils::{
-    confirm, print_projects, print_pull_report, print_report, print_repos, print_status, repo_label,
+    LOCAL, confirm, print_projects, print_pull_report, print_report, print_repos, print_status,
+    repo_label,
 };
 
 /// octotask: multi-repo workspaces: one command for branches, PRs and services across repos.
@@ -87,9 +92,9 @@ enum ProjectCommand {
     /// Create a new project and make it the default
     Init {
         name: String,
-        /// Default base branch for the project's repos
-        #[arg(long, default_value = "main")]
-        base: String,
+        /// Default base branch for the project's repos [default: staging]
+        #[arg(long)]
+        base: Option<String>,
         /// Machine where the project's repos live: `local` (the default), `<host>` or `<host>:<path>`
         #[arg(long)]
         location: Option<String>,
@@ -279,7 +284,18 @@ fn project(registry: &Registry, cmd: ProjectCommand) -> Result<()> {
             base,
             location,
         } => {
-            let location = resolve_optional_location(location.as_deref())?;
+            refuse_unusable_project_name(registry, &name)?;
+            let mut location = resolve_optional_location(location.as_deref())?;
+            let mut base = base;
+            if io::stdin().is_terminal() {
+                if base.is_none() {
+                    base = ask_project_base(&name)?;
+                }
+                if location.is_none() {
+                    location = ask_location(LOCAL)?;
+                }
+            }
+            let base = base.unwrap_or_else(|| DEFAULT_BASE.to_string());
             registry.init_project(&name, &base)?;
             println!(
                 "created project `{name}` (base: {base}) at {}",
@@ -324,16 +340,38 @@ fn repo(registry: &Registry, project_name: &str, cmd: RepoCommand) -> Result<()>
             base,
             location,
         } => {
-            let location = resolve_optional_location(location.as_deref())?;
+            let mut settings = RepoSettings {
+                key: name,
+                alias,
+                base,
+                location: resolve_optional_location(location.as_deref())?,
+            };
+            let at_terminal = io::stdin().is_terminal();
+            let project = registry.load_project(project_name)?;
+            if at_terminal {
+                ask_repo_settings(&project, &url, &mut settings)?;
+            }
+            // Asked once the repo is cloned, when its branches and their dates are known.
+            let choose_base = |_key: &str, branches: &OriginBranches| {
+                at_terminal
+                    .then(|| ask_repo_base(&project, branches))
+                    .flatten()
+            };
             let repo = NewRepo {
                 url: &url,
-                key: name.as_deref(),
-                base: base.as_deref(),
-                alias: alias.as_deref(),
-                location: location.as_ref(),
+                key: settings.key.as_deref(),
+                base: settings.base.as_deref(),
+                alias: settings.alias.as_deref(),
+                location: settings.location.as_ref(),
             };
-            let key = register_repo(registry, project_name, &repo, confirm_missing_base)?;
-            let label = repo_label(&key, alias.as_deref());
+            let key = register_repo(
+                registry,
+                project_name,
+                &repo,
+                confirm_missing_base,
+                choose_base,
+            )?;
+            let label = repo_label(&key, settings.alias.as_deref());
             println!("added `{label}` to {project_name}: {url}");
             let project = registry.load_project(project_name)?;
             let location = project.effective_location(&project.repos[&key], None);
@@ -459,6 +497,15 @@ fn pull(
 }
 
 /// `--location` connects to the machine once, to find the octok home there.
+/// Fails before any question is asked and before another machine is reached.
+fn refuse_unusable_project_name(registry: &Registry, name: &str) -> Result<()> {
+    Project::new(name, DEFAULT_BASE)?;
+    if registry.list_projects()?.iter().any(|known| known == name) {
+        return Err(Error::ProjectExists(name.to_string()));
+    }
+    Ok(())
+}
+
 fn resolve_optional_location(input: Option<&str>) -> Result<Option<Location>> {
     input.map(resolve_location).transpose()
 }

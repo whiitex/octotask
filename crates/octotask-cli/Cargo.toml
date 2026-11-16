@@ -12,6 +12,7 @@ octotask-core = { version = "0.1.0", path = "../octotask-core" }
 [dev-dependencies]
 assert_cmd = "2.2.2"
 predicates = "3.1.4"
+rexpect = "0.7.1"
 tempfile = "3.27.0"
 
 [[bin]]

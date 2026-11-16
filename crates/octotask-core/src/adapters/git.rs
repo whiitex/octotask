@@ -27,6 +27,15 @@ pub struct Commit {
     pub age: String,
 }
 
+/// The branches of `origin` as the last fetch left them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OriginBranches {
+    /// The branch the remote checks out by default, when it says so.
+    pub default: Option<String>,
+    /// Every branch, the one with the most recent commit first.
+    pub newest_first: Vec<String>,
+}
+
 /// Full name of the remote-tracking ref for `branch`.
 pub fn origin_ref(branch: &str) -> String {
     format!("refs/remotes/{ORIGIN}/{branch}")
@@ -93,6 +102,35 @@ impl Git {
             self.place(),
             &["fetch", "--prune", "--progress", ORIGIN],
         )
+    }
+
+    /// The default branch is asked to the remote: a bare clone keeps no trace of it.
+    pub fn origin_branches(&self) -> Result<OriginBranches> {
+        let prefix = origin_ref("");
+        let refs = self.run(&[
+            "for-each-ref",
+            "--sort=-committerdate",
+            "--format=%(refname)",
+            &prefix,
+        ])?;
+        let newest_first = refs
+            .lines()
+            .filter_map(|name| name.strip_prefix(&prefix))
+            .filter(|branch| *branch != "HEAD")
+            .map(str::to_string)
+            .collect();
+        let head = self.run(&["ls-remote", "--symref", ORIGIN, "HEAD"])?;
+        let default = head
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("ref: refs/heads/")?
+                    .strip_suffix("\tHEAD")
+            })
+            .map(str::to_string);
+        Ok(OriginBranches {
+            default,
+            newest_first,
+        })
     }
 
     pub fn branch_exists(&self, branch: &str) -> Result<bool> {

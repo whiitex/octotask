@@ -1,7 +1,10 @@
+use std::path::Path;
+use std::process::Command;
+
 use octotask_core::{Error, Git};
 use tempfile::TempDir;
 
-use super::{canonical, commit_empty, init_repo};
+use super::{canonical, commit_empty, git_setup, init_repo};
 
 #[test]
 fn run_returns_stdout_from_the_given_directory() {
@@ -200,5 +203,52 @@ fn a_worktree_deleted_by_hand_is_pruned_and_its_branch_checked_out_again() {
     assert_eq!(
         Git::new(&worktree).current_branch().unwrap().as_deref(),
         Some("feat/login")
+    );
+}
+
+/// An empty commit on a new `branch`, made at `date`.
+fn commit_on_new_branch(dir: &Path, branch: &str, date: &str) {
+    git_setup(dir, &["checkout", "--quiet", "-b", branch]);
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args([
+            "-c",
+            "user.name=octok",
+            "-c",
+            "user.email=octok@example.com",
+        ])
+        .args(["-c", "commit.gpgsign=false", "commit", "--allow-empty"])
+        .args(["--no-verify", "--quiet", "--message", branch])
+        .env("GIT_AUTHOR_DATE", date)
+        .env("GIT_COMMITTER_DATE", date)
+        .status()
+        .unwrap();
+    assert!(status.success());
+}
+
+#[test]
+fn origin_branches_are_the_default_one_and_all_of_them_newest_first() {
+    let origin = TempDir::new().unwrap();
+    init_repo(origin.path());
+    git_setup(origin.path(), &["symbolic-ref", "HEAD", "refs/heads/trunk"]);
+    commit_empty(origin.path());
+    commit_on_new_branch(origin.path(), "feat/old", "2021-01-01T00:00:00Z");
+    commit_on_new_branch(origin.path(), "feat/new", "2023-01-01T00:00:00Z");
+    commit_on_new_branch(origin.path(), "feat/middle", "2022-01-01T00:00:00Z");
+    git_setup(origin.path(), &["checkout", "--quiet", "trunk"]);
+    let cache = TempDir::new().unwrap();
+    let git = Git::new(cache.path());
+    git.init_bare().unwrap();
+    git.add_origin(&origin.path().display().to_string())
+        .unwrap();
+    git.fetch_origin().unwrap();
+
+    let branches = git.origin_branches().unwrap();
+
+    assert_eq!(branches.default.as_deref(), Some("trunk"));
+    assert_eq!(
+        branches.newest_first,
+        ["trunk", "feat/new", "feat/middle", "feat/old"]
     );
 }
