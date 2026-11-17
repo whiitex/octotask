@@ -38,11 +38,35 @@ workspaces:
 
 Requirements:
 
-- [Rust](https://rustup.rs) 1.89 or newer, to build the binary.
-- `git` 2.37 or newer.
 - macOS or Linux.
+- `git` 2.37 or newer.
 - `ssh`, only to keep repositories on another machine. See [Locations](#locations---location).
 
+### From a release
+
+Every [release](https://github.com/whiitex/octotask/releases) has one archive per platform:
+
+| Platform | Archive |
+|---|---|
+| macOS, Apple silicon | `octok-aarch64-apple-darwin.tar.gz` |
+| macOS, Intel | `octok-x86_64-apple-darwin.tar.gz` |
+| Linux, arm64 | `octok-aarch64-unknown-linux-musl.tar.gz` |
+| Linux, x86_64 | `octok-x86_64-unknown-linux-musl.tar.gz` |
+
+Download the archive of the latest release, unpack it and move `octok` into a folder of your `PATH`:
+
+```sh
+curl -fsSL https://github.com/whiitex/octotask/releases/latest/download/octok-aarch64-apple-darwin.tar.gz | tar -xz
+sudo mkdir -p /usr/local/bin
+sudo mv octok-aarch64-apple-darwin/octok /usr/local/bin/
+```
+
+The Linux binaries are statically linked, so they run on any distribution.
+The file `SHA256SUMS` of the release has the checksum of every archive.
+
+### From source
+
+Building needs [Rust](https://rustup.rs) 1.89 or newer.
 Clone the repository and install the `octok` binary into `~/.cargo/bin`:
 
 ```sh
@@ -52,6 +76,9 @@ make install
 ```
 
 `make install` runs `cargo install --path crates/octotask-cli --locked`.
+
+### After installing
+
 Check the installation with `octok --version`.
 
 `octok` keeps everything it manages under `~/.octotask`.
@@ -276,3 +303,9 @@ It does not contact the git remotes, and it connects over `ssh` only to the othe
 | `make build` | Builds the release binary. |
 | `make install` | Installs `octok` into `~/.cargo/bin`. |
 | `make clean-data` | Asks for confirmation, then deletes `~/.octotask` and the folders of its projects on the other machines, unpushed work in the workspaces included. It stops before deleting `~/.octotask` when a machine cannot be reached. |
+
+### Releases
+
+Every merge into `main` is released: the `Release` workflow tags the merge commit `v<version>`, builds `octok` for the four platforms and publishes a GitHub release with the archives.
+The version is the `version` of the root `Cargo.toml`, shared by both crates.
+A pull request to `main` fails its checks unless that version is a plain `X.Y.Z` higher than every released one, so raise it before opening the pull request.
