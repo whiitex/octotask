@@ -1,0 +1,95 @@
+name: Release
+
+# Every push to main is released as the version in Cargo.toml.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - name: Check that the version can be released
+        id: version
+        run: |
+          version=$(.github/scripts/crate-version.sh)
+          .github/scripts/check-version.sh "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: version
+    strategy:
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    env:
+      TARGET: ${{ matrix.target }}
+      PACKAGE: octok-${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal --target "$TARGET" && rustup default stable
+      - name: Build
+        run: cargo build --release --locked --package octotask --target "$TARGET"
+      - name: Check that the binary runs and reports the version
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          reported=$("target/$TARGET/release/octok" --version)
+          echo "$reported"
+          test "$reported" = "octok $VERSION"
+      - name: Package
+        run: |
+          mkdir "$PACKAGE"
+          cp "target/$TARGET/release/octok" LICENSE README.md "$PACKAGE"
+          tar -czf "$PACKAGE.tar.gz" "$PACKAGE"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.PACKAGE }}
+          path: ${{ env.PACKAGE }}.tar.gz
+          if-no-files-found: error
+
+  # The tag is created here, with the release, only after every build succeeded.
+  release:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          merge-multiple: true
+      - name: Write the checksums
+        run: sha256sum octok-*.tar.gz > SHA256SUMS
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: v${{ needs.version.outputs.version }}
+        run: >
+          gh release create "$TAG"
+          --repo "$GITHUB_REPOSITORY"
+          --target "$GITHUB_SHA"
+          --title "$TAG"
+          --generate-notes
+          octok-*.tar.gz SHA256SUMS
