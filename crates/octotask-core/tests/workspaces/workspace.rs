@@ -49,7 +49,7 @@ fn create_workspace_adds_one_worktree_per_repo_on_a_new_branch_from_the_latest_b
     commit_on(&fx.remote_dir("frontend"), "main", "newer main");
     commit_on(&fx.remote_dir("backend"), "develop", "newer develop");
 
-    let path = create_workspace(&fx.registry(), PROJECT, "feat/login", None)
+    let path = create_workspace(&fx.registry(), PROJECT, "feat/login", None, false)
         .unwrap()
         .path;
 
@@ -70,7 +70,7 @@ fn create_workspace_refuses_a_branch_that_exists_on_a_remote_and_creates_nothing
         "someone else's work",
     );
 
-    let err = create_workspace(&fx.registry(), PROJECT, "feat/login", None).unwrap_err();
+    let err = create_workspace(&fx.registry(), PROJECT, "feat/login", None, false).unwrap_err();
 
     assert!(
         matches!(&err, Error::BranchExists { branch, repos }
@@ -84,14 +84,14 @@ fn create_workspace_refuses_a_branch_that_exists_on_a_remote_and_creates_nothing
 #[test]
 fn create_workspace_restores_a_branch_left_in_the_cache_with_its_commits() {
     let fx = fixture_with_repos(&["frontend"]);
-    let path = create_workspace(&fx.registry(), PROJECT, "feat/login", None)
+    let path = create_workspace(&fx.registry(), PROJECT, "feat/login", None, false)
         .unwrap()
         .path;
     commit_here(&path.join("frontend"), "local work");
     let local_head = head(&path.join("frontend"), "HEAD");
     fs::remove_dir_all(&path).unwrap();
 
-    let workspace = create_workspace(&fx.registry(), PROJECT, "feat/login", None).unwrap();
+    let workspace = create_workspace(&fx.registry(), PROJECT, "feat/login", None, false).unwrap();
 
     assert_eq!(workspace.restored, ["frontend"]);
     assert!(workspace.created.is_empty() && workspace.kept.is_empty());
@@ -105,14 +105,14 @@ fn create_workspace_restores_a_branch_left_in_the_cache_with_its_commits() {
 #[test]
 fn create_workspace_adds_the_worktrees_missing_from_an_existing_workspace() {
     let fx = fixture_with_repos(&["frontend"]);
-    let path = create_workspace(&fx.registry(), PROJECT, "feat/login", None)
+    let path = create_workspace(&fx.registry(), PROJECT, "feat/login", None, false)
         .unwrap()
         .path;
     commit_here(&path.join("frontend"), "local work");
     let local_head = head(&path.join("frontend"), "HEAD");
     fx.register(&fx.remote("backend"));
 
-    let workspace = create_workspace(&fx.registry(), PROJECT, "feat/login", None).unwrap();
+    let workspace = create_workspace(&fx.registry(), PROJECT, "feat/login", None, false).unwrap();
 
     assert_eq!(workspace.created, ["backend"]);
     assert_eq!(workspace.kept, ["frontend"]);
@@ -127,7 +127,7 @@ fn create_workspace_adds_the_worktrees_missing_from_an_existing_workspace() {
 #[test]
 fn create_workspace_lets_a_plain_git_push_publish_the_new_branch() {
     let fx = fixture_with_repos(&["frontend"]);
-    let worktree = create_workspace(&fx.registry(), PROJECT, "feat/login", None)
+    let worktree = create_workspace(&fx.registry(), PROJECT, "feat/login", None, false)
         .unwrap()
         .path
         .join("frontend");
@@ -148,9 +148,9 @@ fn create_workspace_lets_a_plain_git_push_publish_the_new_branch() {
 #[test]
 fn create_workspace_refuses_an_existing_workspace() {
     let fx = fixture_with_repos(&["frontend"]);
-    create_workspace(&fx.registry(), PROJECT, "feat/login", None).unwrap();
+    create_workspace(&fx.registry(), PROJECT, "feat/login", None, false).unwrap();
 
-    let err = create_workspace(&fx.registry(), PROJECT, "feat/login", None).unwrap_err();
+    let err = create_workspace(&fx.registry(), PROJECT, "feat/login", None, false).unwrap_err();
 
     assert!(matches!(err, Error::WorkspaceExists { .. }), "{err:?}");
 }
@@ -159,7 +159,7 @@ fn create_workspace_refuses_an_existing_workspace() {
 fn create_workspace_needs_at_least_one_repo() {
     let fx = Fixture::new();
 
-    let err = create_workspace(&fx.registry(), PROJECT, "feat/login", None).unwrap_err();
+    let err = create_workspace(&fx.registry(), PROJECT, "feat/login", None, false).unwrap_err();
 
     assert!(matches!(err, Error::NoRepos(_)), "{err:?}");
 }
@@ -168,7 +168,7 @@ fn create_workspace_needs_at_least_one_repo() {
 fn create_workspace_rejects_an_invalid_branch_name() {
     let fx = fixture_with_repos(&["frontend"]);
 
-    let err = create_workspace(&fx.registry(), PROJECT, "feat login", None).unwrap_err();
+    let err = create_workspace(&fx.registry(), PROJECT, "feat login", None, false).unwrap_err();
 
     assert!(matches!(err, Error::InvalidName { .. }), "{err:?}");
 }
@@ -191,7 +191,7 @@ fn create_workspace_reports_a_base_branch_missing_on_the_remote() {
     )
     .unwrap();
 
-    let err = create_workspace(&fx.registry(), PROJECT, "feat/login", None).unwrap_err();
+    let err = create_workspace(&fx.registry(), PROJECT, "feat/login", None, false).unwrap_err();
 
     assert!(
         matches!(&err, Error::BaseNotFound { repo, base } if repo == "frontend" && base == "develop"),
@@ -206,7 +206,7 @@ fn create_workspace_undoes_the_worktrees_already_added_when_a_later_repo_fails()
     // git cannot register a worktree when `worktrees` is a file.
     fs::write(fx.cache_dir("backend").join("worktrees"), "").unwrap();
 
-    let err = create_workspace(&fx.registry(), PROJECT, "feat/login", None).unwrap_err();
+    let err = create_workspace(&fx.registry(), PROJECT, "feat/login", None, false).unwrap_err();
 
     assert!(matches!(err, Error::CommandFailed { .. }), "{err:?}");
     assert!(!fx.workspace_dir("feat-login").exists());
@@ -216,7 +216,7 @@ fn create_workspace_undoes_the_worktrees_already_added_when_a_later_repo_fails()
 #[test]
 fn workspace_path_finds_an_existing_workspace_by_branch() {
     let fx = fixture_with_repos(&["frontend"]);
-    let created = create_workspace(&fx.registry(), PROJECT, "feat/login", None)
+    let created = create_workspace(&fx.registry(), PROJECT, "feat/login", None, false)
         .unwrap()
         .path;
 
@@ -234,7 +234,7 @@ fn workspace_path_finds_an_existing_workspace_by_branch() {
 #[test]
 fn locate_workspace_recognises_any_directory_inside_a_workspace() {
     let fx = fixture_with_repos(&["frontend"]);
-    let path = create_workspace(&fx.registry(), PROJECT, "feat/login", None)
+    let path = create_workspace(&fx.registry(), PROJECT, "feat/login", None, false)
         .unwrap()
         .path;
     let nested = path.join("frontend").join("src");
@@ -250,7 +250,7 @@ fn locate_workspace_recognises_any_directory_inside_a_workspace() {
 #[test]
 fn pull_workspace_fast_forwards_each_worktree_to_its_remote_branch() {
     let fx = fixture_with_repos(&["frontend", "backend"]);
-    let path = create_workspace(&fx.registry(), PROJECT, "feat/login", None)
+    let path = create_workspace(&fx.registry(), PROJECT, "feat/login", None, false)
         .unwrap()
         .path;
     commit_on(
@@ -281,7 +281,7 @@ fn pull_workspace_fast_forwards_each_worktree_to_its_remote_branch() {
 #[test]
 fn pull_workspace_leaves_up_to_date_and_diverged_worktrees_alone() {
     let fx = fixture_with_repos(&["frontend", "backend"]);
-    let path = create_workspace(&fx.registry(), PROJECT, "feat/login", None)
+    let path = create_workspace(&fx.registry(), PROJECT, "feat/login", None, false)
         .unwrap()
         .path;
     git(
@@ -305,7 +305,7 @@ fn pull_workspace_leaves_up_to_date_and_diverged_worktrees_alone() {
 #[test]
 fn pull_workspace_skips_repos_without_a_worktree_or_a_branch() {
     let fx = fixture_with_repos(&["frontend"]);
-    let path = create_workspace(&fx.registry(), PROJECT, "feat/login", None)
+    let path = create_workspace(&fx.registry(), PROJECT, "feat/login", None, false)
         .unwrap()
         .path;
     git(&path.join("frontend"), &["checkout", "--quiet", "--detach"]);
@@ -342,10 +342,10 @@ fn pull_workspace_fails_for_an_unknown_workspace() {
 #[test]
 fn status_reports_repos_and_the_checkouts_of_every_workspace() {
     let fx = fixture_with_repos(&["frontend", "backend"]);
-    let login = create_workspace(&fx.registry(), PROJECT, "feat/login", None)
+    let login = create_workspace(&fx.registry(), PROJECT, "feat/login", None, false)
         .unwrap()
         .path;
-    create_workspace(&fx.registry(), PROJECT, "fix/typo", None).unwrap();
+    create_workspace(&fx.registry(), PROJECT, "fix/typo", None, false).unwrap();
     commit_here(&login.join("backend"), "add login endpoint");
 
     let status = status(&fx.home(), &fx.project()).unwrap();
@@ -444,7 +444,7 @@ fn status_tells_a_missing_base_branch_from_a_missing_cache() {
 #[test]
 fn status_reports_a_broken_worktree_without_hiding_the_others() {
     let fx = fixture_with_repos(&["frontend", "backend"]);
-    create_workspace(&fx.registry(), PROJECT, "feat/login", None).unwrap();
+    create_workspace(&fx.registry(), PROJECT, "feat/login", None, false).unwrap();
     // The worktree no longer knows its repository.
     fs::remove_dir_all(fx.cache_dir("backend").join("worktrees")).unwrap();
 
@@ -461,7 +461,7 @@ fn status_reports_a_broken_worktree_without_hiding_the_others() {
 #[test]
 fn remove_workspace_deletes_the_worktrees_and_their_branches() {
     let fx = fixture_with_repos(&["frontend", "backend"]);
-    let path = create_workspace(&fx.registry(), PROJECT, "feat/login", None)
+    let path = create_workspace(&fx.registry(), PROJECT, "feat/login", None, false)
         .unwrap()
         .path;
 
@@ -479,13 +479,13 @@ fn remove_workspace_deletes_the_worktrees_and_their_branches() {
         );
     }
     // The name is free again.
-    create_workspace(&fx.registry(), PROJECT, "feat/login", None).unwrap();
+    create_workspace(&fx.registry(), PROJECT, "feat/login", None, false).unwrap();
 }
 
 #[test]
 fn remove_workspace_refuses_to_lose_uncommitted_or_unpushed_work() {
     let fx = fixture_with_repos(&["frontend", "backend"]);
-    let path = create_workspace(&fx.registry(), PROJECT, "feat/login", None)
+    let path = create_workspace(&fx.registry(), PROJECT, "feat/login", None, false)
         .unwrap()
         .path;
     fs::write(path.join("frontend").join("draft.txt"), "wip").unwrap();
@@ -512,7 +512,7 @@ fn remove_workspace_refuses_to_lose_uncommitted_or_unpushed_work() {
 #[test]
 fn remove_workspace_accepts_pushed_commits() {
     let fx = fixture_with_repos(&["frontend"]);
-    let path = create_workspace(&fx.registry(), PROJECT, "feat/login", None)
+    let path = create_workspace(&fx.registry(), PROJECT, "feat/login", None, false)
         .unwrap()
         .path;
     commit_here(&path.join("frontend"), "local work");
@@ -527,7 +527,7 @@ fn remove_workspace_accepts_pushed_commits() {
 #[test]
 fn remove_workspace_with_force_discards_local_work() {
     let fx = fixture_with_repos(&["frontend"]);
-    let path = create_workspace(&fx.registry(), PROJECT, "feat/login", None)
+    let path = create_workspace(&fx.registry(), PROJECT, "feat/login", None, false)
         .unwrap()
         .path;
     commit_here(&path.join("frontend"), "local work");
@@ -549,7 +549,7 @@ fn remove_workspace_with_force_discards_local_work() {
 #[test]
 fn remove_workspace_cleans_up_after_a_folder_deleted_by_hand() {
     let fx = fixture_with_repos(&["frontend"]);
-    let path = create_workspace(&fx.registry(), PROJECT, "feat/login", None)
+    let path = create_workspace(&fx.registry(), PROJECT, "feat/login", None, false)
         .unwrap()
         .path;
     fs::remove_dir_all(&path).unwrap();
@@ -567,7 +567,7 @@ fn remove_workspace_cleans_up_after_a_folder_deleted_by_hand() {
 #[test]
 fn remove_workspace_with_force_removes_a_broken_worktree() {
     let fx = fixture_with_repos(&["frontend"]);
-    let path = create_workspace(&fx.registry(), PROJECT, "feat/login", None)
+    let path = create_workspace(&fx.registry(), PROJECT, "feat/login", None, false)
         .unwrap()
         .path;
     fs::remove_dir_all(fx.cache_dir("frontend").join("worktrees")).unwrap();
@@ -594,16 +594,32 @@ fn a_workspace_keeps_its_own_location_until_it_is_removed() {
         PROJECT,
         "feat/login",
         Some(&Location::Local),
+        false,
     )
     .unwrap();
     assert_eq!(
-        placed().map(|settings| settings.location),
+        placed().and_then(|settings| settings.location),
         Some(Location::Local)
     );
 
     remove_workspace(&fx.registry(), PROJECT, "feat/login", false).unwrap();
     assert_eq!(placed(), None);
     assert!(fx.cache_dir("frontend").is_dir());
+}
+
+#[test]
+fn removing_a_workspace_forgets_its_run_commands() {
+    let fx = fixture_with_repos(&["frontend"]);
+    create_workspace(&fx.registry(), PROJECT, "feat/login", None, false).unwrap();
+    fx.registry()
+        .update_project(PROJECT, |project| {
+            project.set_workspace_run("feat-login", "frontend", Some("npm run dev"))
+        })
+        .unwrap();
+
+    remove_workspace(&fx.registry(), PROJECT, "feat/login", false).unwrap();
+
+    assert!(fx.project().workspaces.is_empty());
 }
 
 #[test]
@@ -614,6 +630,7 @@ fn a_location_left_by_a_workspace_deleted_by_hand_is_forgotten_by_remove() {
         PROJECT,
         "feat/login",
         Some(&Location::Local),
+        false,
     )
     .unwrap()
     .path;

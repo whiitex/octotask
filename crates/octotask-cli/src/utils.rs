@@ -1,8 +1,13 @@
+use std::collections::HashMap;
 use std::io::{BufRead, Write};
-use std::process::ExitCode;
+use std::os::unix::process::ExitStatusExt;
+use std::process::{ExitCode, ExitStatus};
 
-use octotask_core::{Checkout, Commit, Project, PullOutcome, Result, Status, WorkspaceStatus};
+use octotask_core::{
+    Checkout, Commit, DevChanges, Project, PullOutcome, Result, Status, UpEvent, WorkspaceStatus,
+};
 use serde_json::json;
+use signal_hook::consts::SIGKILL;
 
 /// How a location on this machine is written.
 pub(crate) const LOCAL: &str = "local";
@@ -112,6 +117,82 @@ pub(crate) fn ask(
         Ok(read) if read > 0 => Some(answer.trim().to_string()),
         _ => None,
     }
+}
+
+/// What `octok up` puts in front of the lines of each repo, by repo key: the alias or
+/// the key, padded to one width.
+pub(crate) fn up_labels<'a>(
+    project: &Project,
+    repos: impl Iterator<Item = &'a str>,
+) -> HashMap<String, String> {
+    let names: Vec<(&str, &str)> = repos
+        .map(|key| (key, project.repos[key].alias.as_deref().unwrap_or(key)))
+        .collect();
+    let width = max_width(names.iter().map(|(_key, name)| *name));
+    names
+        .into_iter()
+        .map(|(key, name)| (key.to_string(), format!("{name:<width$}")))
+        .collect()
+}
+
+/// The output of the repos goes to stdout, and what octok says about them to stderr.
+/// `stopping` says that the user has asked for a stop.
+pub(crate) fn print_up_event(labels: &HashMap<String, String>, event: UpEvent, stopping: bool) {
+    match event {
+        UpEvent::Output { repo, line } => println!("{} | {line}", labels[repo]),
+        UpEvent::Exited { repo, status } => {
+            eprintln!("{} | {}", labels[repo], how_it_ended(status, stopping));
+        }
+    }
+}
+
+fn how_it_ended(status: ExitStatus, stopping: bool) -> String {
+    match (stopping, status.signal()) {
+        (true, Some(SIGKILL)) => "killed: it was still running 10 seconds after the stop".into(),
+        (true, _) => "stopped".into(),
+        (false, _) => format!("ended ({status})"),
+    }
+}
+
+/// Lists what is saved of the dev changes of each repo, with the diff of the tracked
+/// files when `with_diff`. The files git does not track are only named: they hold secrets.
+pub(crate) fn print_dev_changes(project: &Project, repos: &[DevChanges], with_diff: bool) {
+    for changes in repos {
+        println!("{}", project_repo_label(project, &changes.repo));
+        if changes.changed.is_empty() && changes.new.is_empty() {
+            println!("  no dev changes");
+        }
+        for path in &changes.changed {
+            println!("  changed  {path}");
+        }
+        for path in &changes.new {
+            println!("  new      {path}");
+        }
+        if with_diff && !changes.diff.is_empty() {
+            println!("\n{}\n", changes.diff);
+        }
+    }
+}
+
+/// Like the text of `print_dev_changes` with the diff: the files git does not track are
+/// only named here too.
+pub(crate) fn print_dev_changes_json(project: &Project, repos: &[DevChanges]) {
+    let repos: Vec<_> = repos
+        .iter()
+        .map(|changes| {
+            json!({
+                "key": changes.repo,
+                "alias": repo_alias(project, &changes.repo),
+                "changed": changes.changed,
+                "new": changes.new,
+                "diff": changes.diff,
+            })
+        })
+        .collect();
+    println!(
+        "{}",
+        json!({"schema": 1, "project": project.name, "repos": repos})
+    );
 }
 
 /// How a repo is shown: its key, followed by the alias when it has one.
@@ -305,11 +386,14 @@ fn print_orphan_caches(status: &Status) {
 }
 
 fn project_repo_label(project: &Project, key: &str) -> String {
-    let alias = project
+    repo_label(key, repo_alias(project, key))
+}
+
+fn repo_alias<'a>(project: &'a Project, key: &str) -> Option<&'a str> {
+    project
         .repos
         .get(key)
-        .and_then(|repo| repo.alias.as_deref());
-    repo_label(key, alias)
+        .and_then(|repo| repo.alias.as_deref())
 }
 
 /// The tool's own message: octok's summary of the failed command comes before it.

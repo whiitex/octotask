@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use super::cache::{Cache, orphan_caches};
+use super::dev::Store;
 use crate::adapters::{Files, origin_ref};
 use crate::config::validate_branch;
 use crate::{Commit, Error, Git, Home, Location, Project, Registry, Repo, Result};
@@ -88,20 +89,26 @@ pub enum PullOutcome {
 ///
 /// With a `location`, every repo of the workspace lives there, whatever the repos and the
 /// project say. The choice is saved in the project until the workspace is removed.
+///
+/// Every new checkout gets the dev changes saved for its repo. Nothing is created when
+/// some of them no longer apply to the commit a checkout starts from, unless
+/// `allow_stale_dev`: the files they are for are then left as they are in git.
 pub fn create_workspace(
     registry: &Registry,
     project_name: &str,
     branch: &str,
     location: Option<&Location>,
+    allow_stale_dev: bool,
 ) -> Result<NewWorkspace> {
     validate_branch(branch)?;
     let name = workspace_name(branch);
+    let home = registry.home();
     let Some(location) = location else {
         let project = registry.load_project(project_name)?;
-        return add_worktrees_of_project(registry.home(), &project, branch);
+        return add_worktrees_of_project(home, &project, branch, allow_stale_dev);
     };
     let (project, newly_placed) = place_workspace(registry, project_name, &name, location)?;
-    add_worktrees_of_project(registry.home(), &project, branch).inspect_err(|_| {
+    add_worktrees_of_project(home, &project, branch, allow_stale_dev).inspect_err(|_| {
         if newly_placed {
             let _ = forget_placement(registry, &project, &name);
         }
@@ -112,7 +119,7 @@ pub fn create_workspace(
 /// Returns the workspace name. Refused when that would lose work, unless `force`.
 ///
 /// Also cleans up what a folder deleted by hand left in the caches, and forgets the
-/// location the workspace had of its own.
+/// settings the workspace had of its own.
 pub fn remove_workspace(
     registry: &Registry,
     project_name: &str,
@@ -122,11 +129,12 @@ pub fn remove_workspace(
     let project = registry.load_project(project_name)?;
     let name = workspace_name(branch);
     match remove_worktrees_of_project(registry.home(), &project, branch, force) {
-        // Only the location of the workspace was left to forget.
+        // Only the settings of the workspace were left to forget.
         Err(Error::WorkspaceNotFound(_)) if project.workspaces.contains_key(&name) => {}
         removed => drop(removed?),
     }
     forget_placement(registry, &project, &name)?;
+    forget_commands(registry, &project, &name)?;
     Ok(name)
 }
 
@@ -142,7 +150,7 @@ fn place_workspace(
     let placed_there = project
         .workspaces
         .get(name)
-        .is_some_and(|settings| &settings.location == location);
+        .is_some_and(|settings| settings.location.as_ref() == Some(location));
     if placed_there {
         return Ok((project, false));
     }
@@ -163,10 +171,10 @@ fn place_workspace(
 /// Forgets the location a workspace had of its own, and deletes the caches cloned there
 /// only for it.
 fn forget_placement(registry: &Registry, project: &Project, name: &str) -> Result<()> {
-    let Some(settings) = project.workspaces.get(name) else {
+    let settings = project.workspaces.get(name);
+    let Some(location) = settings.and_then(|settings| settings.location.as_ref()) else {
         return Ok(());
     };
-    let location = &settings.location;
     let remaining = registry.update_project(&project.name, |project| {
         project.set_workspace_location(name, None)?;
         Ok(project.clone())
@@ -174,7 +182,7 @@ fn forget_placement(registry: &Registry, project: &Project, name: &str) -> Resul
     let used_by_a_workspace = remaining
         .workspaces
         .values()
-        .any(|settings| &settings.location == location);
+        .any(|settings| settings.location.as_ref() == Some(location));
     for (key, repo) in &remaining.repos {
         if !used_by_a_workspace && remaining.effective_location(repo, None) != location {
             Cache::new(registry.home(), location, &remaining.name, key).remove()?;
@@ -183,7 +191,24 @@ fn forget_placement(registry: &Registry, project: &Project, name: &str) -> Resul
     Ok(())
 }
 
-fn add_worktrees_of_project(home: &Home, project: &Project, branch: &str) -> Result<NewWorkspace> {
+/// Forgets the commands a workspace had of its own.
+fn forget_commands(registry: &Registry, project: &Project, name: &str) -> Result<()> {
+    let settings = project.workspaces.get(name);
+    if settings.is_some_and(|settings| !settings.repos.is_empty()) {
+        registry.update_project(&project.name, |project| {
+            project.forget_workspace(name);
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
+fn add_worktrees_of_project(
+    home: &Home,
+    project: &Project,
+    branch: &str,
+    allow_stale_dev: bool,
+) -> Result<NewWorkspace> {
     if project.repos.is_empty() {
         return Err(Error::NoRepos(project.name.clone()));
     }
@@ -196,6 +221,7 @@ fn add_worktrees_of_project(home: &Home, project: &Project, branch: &str) -> Res
     }
     fetch_all(&members)?;
     let plan = plan_worktrees(project, branch, &members)?;
+    prepare_dev_changes(branch, &plan, allow_stale_dev)?;
     add_worktrees(branch, &plan, &folders)?;
     Ok(new_workspace(path, plan))
 }
@@ -259,10 +285,7 @@ pub fn pull_workspace(
     project: &Project,
     workspace: &str,
 ) -> Result<Vec<(String, Result<PullOutcome>)>> {
-    if !any_exists(&workspace_folders(home, project, workspace))? {
-        return Err(Error::WorkspaceNotFound(workspace.to_string()));
-    }
-    let report = members(home, project, workspace)
+    let report = members_of_existing(home, project, workspace)?
         .iter()
         .map(|member| (member.key.to_string(), pull_worktree(member)))
         .collect();
@@ -332,16 +355,18 @@ pub(crate) fn workspaces_with_repo(
 }
 
 /// One repo's place in a workspace: its cache and its worktree, on the repo's machine.
-struct Member<'a> {
-    key: &'a str,
-    repo: &'a Repo,
-    location: Location,
+pub(super) struct Member<'a> {
+    pub(super) key: &'a str,
+    pub(super) repo: &'a Repo,
+    pub(super) location: Location,
     cache: Cache,
-    worktree: PathBuf,
+    pub(super) worktree: PathBuf,
+    /// The dev changes saved for the repo on the machine of this checkout.
+    pub(super) dev: Store,
 }
 
 impl Member<'_> {
-    fn has_worktree(&self) -> Result<bool> {
+    pub(super) fn has_worktree(&self) -> Result<bool> {
         Files::new(&self.location).is_dir(&self.worktree)
     }
 
@@ -352,6 +377,33 @@ impl Member<'_> {
     fn shown_worktree(&self) -> PathBuf {
         self.location.shown(&self.worktree)
     }
+}
+
+/// The repos of a workspace, which must exist.
+pub(super) fn members_of_existing<'a>(
+    home: &Home,
+    project: &'a Project,
+    workspace: &str,
+) -> Result<Vec<Member<'a>>> {
+    if !any_exists(&workspace_folders(home, project, workspace))? {
+        return Err(Error::WorkspaceNotFound(workspace.to_string()));
+    }
+    Ok(members(home, project, workspace))
+}
+
+/// Keys of the repos named by key or alias. `None` when no repo is named: all of them.
+pub(super) fn chosen_keys<'a>(
+    project: &'a Project,
+    names: &[&str],
+) -> Result<Option<Vec<&'a str>>> {
+    if names.is_empty() {
+        return Ok(None);
+    }
+    let keys: Result<Vec<&str>> = names
+        .iter()
+        .map(|name| project.resolve_repo(name))
+        .collect();
+    keys.map(Some)
 }
 
 fn members<'a>(home: &Home, project: &'a Project, workspace: &str) -> Vec<Member<'a>> {
@@ -366,6 +418,7 @@ fn members<'a>(home: &Home, project: &'a Project, workspace: &str) -> Vec<Member
                 repo,
                 cache: Cache::new(home, &location, &project.name, key),
                 worktree: folder.join(key),
+                dev: Store::new(home, &location, &project.name, key),
                 location,
             }
         })
@@ -498,6 +551,27 @@ fn base_ref(project: &Project, member: &Member, git: &Git) -> Result<String> {
     }
 }
 
+/// Makes git keep the saved dev changes in the checkouts about to be added.
+/// Fails when some of them no longer apply to the commit a checkout starts from, unless
+/// `allow_stale`.
+fn prepare_dev_changes(branch: &str, plan: &Plan, allow_stale: bool) -> Result<()> {
+    for (member, step) in plan {
+        let rev = match step {
+            Step::Keep => continue,
+            Step::Restore => format!("refs/heads/{branch}"),
+            Step::Create { start_point } => start_point.clone(),
+        };
+        let stale = member.dev.prepare(member.cache.dir(), &rev)?;
+        if !stale.is_empty() && !allow_stale {
+            return Err(Error::StaleDevChanges {
+                repo: member.key.to_string(),
+                files: stale,
+            });
+        }
+    }
+    Ok(())
+}
+
 fn add_worktrees(branch: &str, plan: &Plan, folders: &[Folder]) -> Result<()> {
     for (done, (member, step)) in plan.iter().enumerate() {
         let result = member
@@ -505,7 +579,8 @@ fn add_worktrees(branch: &str, plan: &Plan, folders: &[Folder]) -> Result<()> {
             .lock()
             .and_then(|_lock| add_worktree(member, branch, step));
         if let Err(error) = result {
-            undo_worktrees(&plan[..done], branch, folders);
+            // The one that failed may be half done.
+            undo_worktrees(&plan[..=done], branch, folders);
             return Err(error);
         }
     }
@@ -515,13 +590,16 @@ fn add_worktrees(branch: &str, plan: &Plan, folders: &[Folder]) -> Result<()> {
 fn add_worktree(member: &Member, branch: &str, step: &Step) -> Result<()> {
     let git = member.cache.git();
     match step {
-        Step::Keep => Ok(()),
+        Step::Keep => return Ok(()),
         Step::Restore => {
             git.prune_worktrees()?;
-            git.checkout_worktree(&member.worktree, branch)
+            git.checkout_worktree(&member.worktree, branch)?;
         }
-        Step::Create { start_point } => git.add_worktree(&member.worktree, branch, start_point),
+        Step::Create { start_point } => {
+            git.add_worktree(&member.worktree, branch, start_point)?;
+        }
     }
+    member.dev.copy_new_files(&member.worktree)
 }
 
 /// Best effort: the error that triggered the cleanup is the one worth reporting.

@@ -11,6 +11,8 @@ Working on it means creating the same branch in each of them, keeping them up to
 - **No repeated downloads.** Each repository is cloned once into a cache, and every workspace is created from it in an instant.
 - **Plain git underneath.** `octok` calls your own `git`, so your credentials, SSH config and hooks apply, and every checkout is a normal git working tree.
 - **Repos on other machines.** A repository can live on another machine, such as a VM, reached over `ssh`: `octok` runs the same commands there.
+- **One command to start everything.** `octok up` starts every repository of a workspace, shows their output together and stops them all at `Ctrl-C`.
+- **Dev changes that follow you.** The local-only edits a repository needs to run on your machine, and files such as `.env`, are saved once, put into every new workspace and kept out of every commit.
 
 ```console
 $ octok project init shop
@@ -90,6 +92,7 @@ Set the `OCTOTASK_HOME` environment variable to use another folder.
 | `~/.octotask/projects/<project>.yaml` | The repositories of a project. |
 | `~/.octotask/cache/<project>/<repo>.git` | The bare clone of a repository. |
 | `~/.octotask/workspaces/<project>/<workspace>/<repo>` | The checkouts of a workspace. |
+| `~/.octotask/dev/<project>/<repo>` | The dev changes saved for a repository. |
 
 ## Features
 
@@ -126,6 +129,7 @@ A repository can also have a shorter **alias**, accepted wherever the key is.
 | `octok repo set <repo> --base <branch>` | Changes the base branch. `--no-base` goes back to the base branch of the project. |
 | `octok repo set <repo> --url <url>` | Changes the URL and fetches the clone from it. |
 | `octok repo set <repo> --location <location>` | Moves the repository to another machine. `--no-location` goes back to the location of the project. |
+| `octok repo set <repo> --setup <command>` `--run <command>` | Set the commands that `octok up` runs to prepare and start the repository: see [Running](#running-octok-up). |
 | `octok repo rm <repo>` | Unregisters a repository and deletes its clone. Refused while a workspace uses it. |
 
 The options of `octok repo set` can be combined in one command.
@@ -175,7 +179,7 @@ It is named after its branch, with `/` replaced by `-`: the branch `feat/login` 
 
 | Command | What it does |
 |---|---|
-| `octok branch <branch> [--location <location>]` | Fetches every repository, creates `<branch>` from its up-to-date base branch and checks it out in a new workspace. Prints the path of the workspace. With `--location`, the whole workspace lives on that machine. |
+| `octok branch <branch> [--location <location>] [--allow-stale-dev]` | Fetches every repository, creates `<branch>` from its up-to-date base branch and checks it out in a new workspace, with the [dev changes](#dev-changes-octok-dev) of each repository. Prints the path of the workspace. With `--location`, the whole workspace lives on that machine. |
 | `octok checkout -b <branch>` | Same as `octok branch <branch>`. |
 | `octok checkout <branch>` | Prints the path of an existing workspace. |
 | `octok rm <branch> [--force]` | Deletes a workspace: its checkouts, its folder and its local branches. |
@@ -201,7 +205,7 @@ This brings in a repository registered after the workspace was created, finishes
 **Removing safely.**
 `octok rm` refuses to delete a workspace that holds uncommitted changes, unpushed commits or files that do not belong to a checkout, and lists what it found.
 `--force` deletes the workspace anyway and discards that work.
-Files ignored by git, such as `.env`, are deleted without a warning.
+Files ignored by git, such as `.env`, are deleted without a warning, and so are the dev changes: they are saved elsewhere.
 
 ### Locations: `--location`
 
@@ -284,6 +288,93 @@ They exit with code 1 if any repository failed.
 
 `octok pull` only fast-forwards: it never merges, rebases or resets.
 A checkout whose branch has diverged from the remote, is not on the remote yet or is on a detached HEAD is skipped and reported.
+
+### Running: `octok up`
+
+A repository can say how it is started, with two shell commands:
+
+- the **run command** starts it, such as `npm run dev`;
+- the **setup command** prepares a checkout before its first run, such as `npm ci`.
+
+| Command | What it does |
+|---|---|
+| `octok repo set <repo> --run <command>` | Sets the run command of a repository. `--no-run` removes it. |
+| `octok repo set <repo> --setup <command>` | Sets the setup command of a repository. `--no-setup` removes it. |
+| `octok repo set <repo> --run <command> --branch <branch>` | Sets the run command for the workspace of one branch only, for example to use another port there. `--no-run --branch <branch>` goes back to the command of the repository. |
+| `octok up [<repo>...] [--branch <branch>]` | Starts the repositories of a workspace and stays attached until they have all ended. Without `<repo>`, it starts every repository that has a run command. Without `--branch`, it uses the workspace of the current folder. |
+
+```console
+$ octok repo set frontend --setup 'npm ci' --run 'npm run dev -- --port 3000'
+$ octok repo set backend --run 'PORT=9005 uv run main.py'
+
+$ octok up --branch feat/login
+frontend | $ npm ci
+backend  | $ PORT=9005 uv run main.py
+backend  | Uvicorn running on http://0.0.0.0:9005
+frontend | added 312 packages in 9s
+frontend | $ npm run dev -- --port 3000
+frontend | Local: http://localhost:3000/
+^Cstopping...
+backend  | stopped
+frontend | stopped
+```
+
+- **Where a command runs.** In the checkout of its repository in that workspace, with `sh`, on the machine where the checkout lives. A repository without a run command is not started.
+- **Setup.** The setup command runs before the run command, until it succeeds once in that checkout, and again when its text changes. When it fails, the repository is not started.
+- **Output.** Every line a repository prints, on stdout or stderr, goes to the stdout of `octok` with the alias or the key of the repository in front. A line that starts with `$` is a command that `octok` runs. What `octok` itself says goes to stderr.
+- **A command that ends.** It does not stop the others. `octok up` ends when every repository has ended, with code 0 if they all ended well and 1 otherwise.
+- **Stopping.** `Ctrl-C` stops every repository, and `octok up` then exits with code 130. A command and every process it started receive `SIGTERM`, and `SIGKILL` if they are still running 10 seconds later.
+- **No process left behind.** The same stop happens by itself when `octok` is killed or its terminal is closed.
+- **Repositories on another machine.** Their commands run there, over `ssh`, and stop in the same way. They also stop when they have not heard from `octok` for 30 seconds, which is what a lost connection looks like from the other machine. On its side, `octok` gives up on a machine that has not answered for 15 seconds.
+
+### Dev changes: `octok dev`
+
+Some changes are needed to run a repository on your machine and must never be committed: a port, a database name, a line turned off, a `.env` file.
+`octok` calls them **dev changes**.
+Save them once, and every new workspace gets them, while git never sees them.
+
+| Command | What it does |
+|---|---|
+| `octok dev save [<repo>...] [--file <path>]... [--branch <branch>]` | Saves the dev changes of a workspace from its checkouts, replacing the ones saved before. Without `<repo>`, it saves every repository. Without `--branch`, it uses the workspace of the current folder. |
+| `octok dev show [<repo>...] [--json]` | Shows what is saved for each repository: the files, and the changes to the tracked ones. |
+| `octok branch <branch> --allow-stale-dev` | Creates a workspace even when some dev changes no longer apply. See below. |
+
+```console
+$ cd "$(octok checkout feat/login)/shop-backend"
+$ $EDITOR main.py                      # port 8000 becomes 9005
+$ echo 'TOKEN=...' > .env
+
+$ octok dev save --file .env
+shop-backend (backend)
+  changed  main.py
+  new      .env
+
+$ git status --short                   # nothing: git no longer sees them
+
+$ cd "$(octok branch feat/cart)/shop-backend"
+$ grep port main.py                    # the new workspace has them
+    run(port=9005)
+```
+
+- **What is saved.** For each repository: every change to a tracked file that is not committed, and every file that git does not track.
+  A file that git ignores, such as `.env`, is saved only when it is named with `--file`, and then stays saved for as long as it is in the checkout.
+  Commit your real work before saving: whatever is not committed counts as a dev change.
+- **Changing them.** Edit the files in a checkout and run `octok dev save` again: what is saved follows the checkout.
+  Saving from a checkout with no dev changes left removes them.
+- **New workspaces.** `octok branch` puts the dev changes in every checkout it creates.
+  The workspaces that already exist keep what they have.
+- **Commits.** A tracked file with dev changes can still be edited and committed: the commit holds your edit and not the dev changes, which stay in the file on disk.
+  `git status` and `git diff` do not show them: `octok dev show` does.
+  The files that git does not track are ignored by git in every checkout.
+- **Lines that clash.** A change to the very lines of a dev change cannot be told apart from it, so git refuses to stage that file and says so.
+  If it is a new dev change, run `octok dev save`.
+- **A base branch that changed the same lines.** The dev changes of that file can no longer be applied, and `octok branch` creates nothing and names the file.
+  `--allow-stale-dev` creates the workspace with that file as it is in git: make the dev changes again there, then run `octok dev save`.
+- **Where they are kept.** Under the `octok` home of the machine where the repository lives, in `dev/<project>/<repo>`, so a `.env` never leaves that machine.
+  Inside, `dev/changed` holds the tracked files with their dev changes, `dev/new` the files that git does not track, and `base` the tracked files as git had them when they were saved.
+  They are deleted with the repository and with the project, and when the repository moves to another machine.
+- **How it works.** `octok` sets up a git filter in the clone of the repository, for the files with dev changes only.
+  git runs it when it writes one of those files, to put the dev changes in, and when it reads one, to take them out.
 
 ### Overview: `octok status`
 

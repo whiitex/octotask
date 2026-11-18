@@ -1,5 +1,7 @@
 use super::cache::Cache;
-use super::workspace::workspaces_with_repo;
+use super::dev::Store;
+use super::workspace::{workspace_name, workspaces_with_repo};
+use crate::config::validate_branch;
 use crate::{Error, Home, Location, OriginBranches, Project, Registry, Result};
 
 /// What `octok repo add` asks for. `key` defaults to the last path segment of the url,
@@ -73,6 +75,10 @@ pub struct RepoChanges<'a> {
     pub url: Option<&'a str>,
     /// `Some(None)` goes back to the project's location.
     pub location: Option<Option<&'a Location>>,
+    /// `Some(None)` removes the setup command.
+    pub setup: Option<Option<&'a str>>,
+    /// `Some(None)` removes the run command.
+    pub run: Option<Option<&'a str>>,
 }
 
 /// Changes the settings of the repo with this key or alias. Returns its key.
@@ -125,8 +131,26 @@ pub fn update_repo(
     })?;
     if moves {
         old_cache.remove()?;
+        dev_store(home, &project, &key).remove()?;
     }
     Ok(key)
+}
+
+/// Sets the command that starts the repo with this key or alias in the workspace of
+/// `branch` only. `None` goes back to the command of the repo. Returns the key of the repo.
+pub fn set_workspace_run(
+    registry: &Registry,
+    project_name: &str,
+    name: &str,
+    branch: &str,
+    command: Option<&str>,
+) -> Result<String> {
+    validate_branch(branch)?;
+    registry.update_project(project_name, |project| {
+        let key = project.resolve_repo(name)?.to_string();
+        project.set_workspace_run(&workspace_name(branch), &key, command)?;
+        Ok(key)
+    })
 }
 
 /// Unregisters the repo with this key or alias and deletes its cache. Returns its key.
@@ -137,6 +161,7 @@ pub fn unregister_repo(registry: &Registry, project_name: &str, name: &str) -> R
     refuse_if_in_use(registry.home(), &project, &key)?;
     registry.update_project(project_name, |project| project.remove_repo(&key))?;
     Cache::of_repo(registry.home(), &project, &key, &project.repos[&key]).remove()?;
+    dev_store(registry.home(), &project, &key).remove()?;
     Ok(key)
 }
 
@@ -153,6 +178,12 @@ pub fn fetch_repos(home: &Home, project: &Project) -> Vec<(String, Result<()>)> 
             (key.clone(), result)
         })
         .collect()
+}
+
+/// The dev changes saved for a repo where the project keeps it.
+pub(super) fn dev_store(home: &Home, project: &Project, key: &str) -> Store {
+    let location = project.effective_location(&project.repos[key], None);
+    Store::new(home, location, &project.name, key)
 }
 
 fn refuse_if_in_use(home: &Home, project: &Project, key: &str) -> Result<()> {
@@ -181,6 +212,12 @@ fn apply_changes(project: &mut Project, key: &str, changes: &RepoChanges) -> Res
     }
     if let Some(location) = changes.location {
         project.set_repo_location(key, location.cloned())?;
+    }
+    if let Some(setup) = changes.setup {
+        project.set_repo_setup(key, setup)?;
+    }
+    if let Some(run) = changes.run {
+        project.set_repo_run(key, run)?;
     }
     Ok(())
 }

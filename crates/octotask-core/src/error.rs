@@ -80,8 +80,23 @@ pub enum Error {
     WorkspaceExists { name: String, path: PathBuf },
     #[error("no workspace for `{0}`: create it with `octok checkout -b {0}`")]
     WorkspaceNotFound(String),
-    #[error("not inside a workspace: pass its branch, as in `octok pull <branch>`")]
-    NotInWorkspace,
+    #[error("not inside a workspace: pass its branch, as in `{0}`")]
+    NotInWorkspace(&'static str),
+    #[error(
+        "no repo of workspace `{0}` has a `run` command: set one with `octok repo set <repo> --run <command>`"
+    )]
+    NothingToRun(String),
+    #[error("repo `{0}` has no `run` command: set one with `octok repo set {0} --run <command>`")]
+    NoRunCommand(String),
+    #[error("repo `{repo}` has no worktree in workspace `{workspace}`: add it with `octok branch`")]
+    NoWorktree { repo: String, workspace: String },
+    #[error(
+        "the dev changes of `{repo}` no longer apply to: {}\nThe branch changed the same lines. `--allow-stale-dev` creates the workspace with those files as they are in git: make the dev changes again there, then run `octok dev save`.",
+        .files.join(", ")
+    )]
+    StaleDevChanges { repo: String, files: Vec<String> },
+    #[error("no checkout has the file `{0}`")]
+    DevFileNotFound(String),
     #[error("cannot locate home directory (set OCTOTASK_HOME)")]
     NoHome,
     #[error("`{0}` not found: install it or add it to PATH")]

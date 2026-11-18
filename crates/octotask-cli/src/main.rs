@@ -1,24 +1,33 @@
 mod prompts;
 mod utils;
 
-use std::io::{self, IsTerminal};
+use std::io::{self, IsTerminal, Write};
 use std::process::ExitCode;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
 
 use clap::{Args, Parser, Subcommand};
 use octotask_core::{
     Error, Home, Location, NewRepo, OriginBranches, Project, Registry, RepoChanges, Result, Ssh,
-    create_workspace, fetch_repos, locate_workspace, pull_workspace, register_repo, remove_project,
-    remove_workspace, resolve_location, set_project_location, status, unregister_repo, update_repo,
+    Stopper, create_workspace, dev_changes, fetch_repos, locate_workspace, pull_workspace,
+    register_repo, remove_project, remove_workspace, resolve_location, save_dev_changes,
+    set_project_location, set_workspace_run, start_workspace, status, unregister_repo, update_repo,
     workspace_name, workspace_path,
 };
+use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
+use signal_hook::iterator::Signals;
 
 use prompts::{
     DEFAULT_BASE, RepoSettings, ask_location, ask_project_base, ask_repo_base, ask_repo_settings,
 };
 use utils::{
-    LOCAL, confirm, print_projects, print_pull_report, print_report, print_repos, print_status,
-    repo_label,
+    LOCAL, confirm, print_dev_changes, print_dev_changes_json, print_projects, print_pull_report,
+    print_report, print_repos, print_status, print_up_event, repo_label, up_labels,
 };
+
+/// Exit code of a command ended by Ctrl-C, as shells report it.
+const INTERRUPTED: u8 = 130;
 
 /// octotask: multi-repo workspaces: one command for branches, PRs and services across repos.
 #[derive(Parser)]
@@ -52,6 +61,10 @@ enum Command {
         /// `local`, `<host>` or `<host>:<path>`
         #[arg(long)]
         location: Option<String>,
+        /// Create the workspace even if some dev changes no longer apply: the files they
+        /// are for are left as they are in git
+        #[arg(long)]
+        allow_stale_dev: bool,
     },
     /// Delete a workspace: its worktrees, its folder and the local branches
     Rm {
@@ -69,12 +82,29 @@ enum Command {
         /// With `-b`: machine where the whole workspace lives
         #[arg(long, requires = "create")]
         location: Option<String>,
+        /// With `-b`: create the workspace even if some dev changes no longer apply
+        #[arg(long, requires = "create")]
+        allow_stale_dev: bool,
     },
     /// Fetch, then fast-forward each worktree of a workspace to its remote branch
     Pull {
         /// Branch of the workspace (defaults to the workspace of the current directory)
         branch: Option<String>,
     },
+    /// Start the repos of a workspace, each with its `run` command, until Ctrl-C
+    ///
+    /// Every line a repo prints is shown with the name of the repo in front. A repo
+    /// without a `run` command is not started.
+    Up {
+        /// Keys or aliases of the repos to start (defaults to every repo with a `run` command)
+        repos: Vec<String>,
+        /// Branch of the workspace (defaults to the workspace of the current directory)
+        #[arg(short, long)]
+        branch: Option<String>,
+    },
+    /// Manage the dev changes: what every new workspace gets and no commit contains
+    #[command(subcommand)]
+    Dev(DevCommand),
     /// Show the project, its repos and the checkouts of every workspace
     Status {
         #[arg(long)]
@@ -121,6 +151,31 @@ enum ProjectCommand {
 }
 
 #[derive(Subcommand)]
+enum DevCommand {
+    /// Save the dev changes of a workspace: what its checkouts have and git does not
+    ///
+    /// For each repo: every change that is not committed, and every file git does not
+    /// track. What was saved before for the repo is replaced.
+    Save {
+        /// Keys or aliases of the repos (defaults to every repo of the workspace)
+        repos: Vec<String>,
+        /// A file that git ignores, to save all the same, e.g. `.env`: can be repeated
+        #[arg(long = "file", value_name = "PATH")]
+        files: Vec<String>,
+        /// Branch of the workspace (defaults to the workspace of the current directory)
+        #[arg(short, long)]
+        branch: Option<String>,
+    },
+    /// Show the dev changes saved for the repos
+    Show {
+        /// Keys or aliases of the repos (defaults to every repo of the project)
+        repos: Vec<String>,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum RepoCommand {
     /// Register a git repo in the project and clone it
     Add {
@@ -143,7 +198,7 @@ enum RepoCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Change the alias, the base branch, the url or the location of a repo
+    /// Change the alias, the base branch, the url, the location or the commands of a repo
     Set {
         /// Key or alias of the repo
         repo: String,
@@ -192,6 +247,28 @@ struct RepoSetArgs {
     /// Go back to the project's location
     #[arg(long)]
     no_location: bool,
+    /// Shell command that `octok up` runs in a checkout before its first run, e.g. `npm ci`
+    #[arg(long, conflicts_with = "no_setup")]
+    setup: Option<String>,
+    /// Remove the setup command
+    #[arg(long)]
+    no_setup: bool,
+    /// Shell command that `octok up` runs in the checkout to start the repo
+    #[arg(long, group = "run_change")]
+    run: Option<String>,
+    /// Remove the run command
+    #[arg(long, group = "run_change")]
+    no_run: bool,
+    /// Change the run command in the workspace of this branch only
+    #[arg(
+        long,
+        requires = "run_change",
+        conflicts_with_all = [
+            "alias", "no_alias", "base", "no_base", "url", "location", "no_location", "setup",
+            "no_setup",
+        ]
+    )]
+    branch: Option<String>,
 }
 
 impl RepoSetArgs {
@@ -202,6 +279,8 @@ impl RepoSetArgs {
             base: optional_change(self.base.as_deref(), self.no_base),
             url: self.url.as_deref(),
             location: optional_change(location, self.no_location),
+            setup: optional_change(self.setup.as_deref(), self.no_setup),
+            run: optional_change(self.run.as_deref(), self.no_run),
         }
     }
 }
@@ -246,14 +325,26 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Command::Project(cmd) => project(&registry, cmd)?,
         Command::Repo(cmd) => repo(&registry, &resolve_project()?, cmd)?,
         Command::Fetch => return fetch(&registry, &resolve_project()?),
-        Command::Branch { name, location } => {
-            create(&registry, &resolve_project()?, &name, location.as_deref())?
+        Command::Branch {
+            name: branch,
+            location,
+            allow_stale_dev,
         }
-        Command::Checkout {
+        | Command::Checkout {
             create: true,
             branch,
             location,
-        } => create(&registry, &resolve_project()?, &branch, location.as_deref())?,
+            allow_stale_dev,
+        } => {
+            let location = location.as_deref();
+            create(
+                &registry,
+                &resolve_project()?,
+                &branch,
+                location,
+                allow_stale_dev,
+            )?
+        }
         Command::Checkout {
             create: false,
             branch,
@@ -269,6 +360,31 @@ fn run(cli: Cli) -> Result<ExitCode> {
             println!("removed workspace `{name}` from {project_name}");
         }
         Command::Pull { branch } => return pull(&registry, explicit_project, branch.as_deref()),
+        Command::Dev(DevCommand::Save {
+            repos,
+            files,
+            branch,
+        }) => {
+            let usage = "octok dev save --branch <branch>";
+            let (project_name, workspace) =
+                target_workspace(&registry, explicit_project, branch.as_deref(), usage)?;
+            let project = registry.load_project(&project_name)?;
+            let (repos, files) = (as_strs(&repos), as_strs(&files));
+            let saved = save_dev_changes(registry.home(), &project, &workspace, &repos, &files)?;
+            print_dev_changes(&project, &saved, false);
+        }
+        Command::Dev(DevCommand::Show { repos, json }) => {
+            let project = registry.load_project(&resolve_project()?)?;
+            let saved = dev_changes(registry.home(), &project, &as_strs(&repos))?;
+            if json {
+                print_dev_changes_json(&project, &saved);
+            } else {
+                print_dev_changes(&project, &saved, true);
+            }
+        }
+        Command::Up { repos, branch } => {
+            return up(&registry, explicit_project, branch.as_deref(), &repos);
+        }
         Command::Status { json } => {
             let project = registry.load_project(&resolve_project()?)?;
             print_status(&status(registry.home(), &project)?, json);
@@ -381,6 +497,13 @@ fn repo(registry: &Registry, project_name: &str, cmd: RepoCommand) -> Result<()>
         }
         RepoCommand::Ls { json } => print_repos(&registry.load_project(project_name)?, json),
         RepoCommand::Set { repo, changes } => {
+            if let Some(branch) = &changes.branch {
+                let run = changes.run.as_deref();
+                let key = set_workspace_run(registry, project_name, &repo, branch, run)?;
+                let workspace = workspace_name(branch);
+                println!("updated `{key}` in workspace `{workspace}` of {project_name}");
+                return Ok(());
+            }
             let location = resolve_optional_location(changes.location.as_deref())?;
             let key = update_repo(
                 registry,
@@ -454,9 +577,11 @@ fn create(
     project_name: &str,
     branch: &str,
     location: Option<&str>,
+    allow_stale_dev: bool,
 ) -> Result<()> {
     let location = resolve_optional_location(location)?;
-    let workspace = create_workspace(registry, project_name, branch, location.as_ref())?;
+    let location = location.as_ref();
+    let workspace = create_workspace(registry, project_name, branch, location, allow_stale_dev)?;
     let name = workspace_name(branch);
     if workspace.kept.is_empty() && workspace.restored.is_empty() {
         eprintln!("created workspace `{name}` in {project_name}");
@@ -484,16 +609,80 @@ fn pull(
     explicit_project: Option<&str>,
     branch: Option<&str>,
 ) -> Result<ExitCode> {
-    let (project_name, workspace) = match branch {
-        Some(branch) => (
-            registry.resolve_project(explicit_project)?,
-            workspace_name(branch),
-        ),
-        None => current_workspace(registry.home())?,
-    };
+    let (project_name, workspace) =
+        target_workspace(registry, explicit_project, branch, "octok pull <branch>")?;
     let project = registry.load_project(&project_name)?;
     let report = pull_workspace(registry.home(), &project, &workspace)?;
     Ok(print_pull_report(&project, report))
+}
+
+/// Stays attached until every command has ended. Ctrl-C stops them all.
+fn up(
+    registry: &Registry,
+    explicit_project: Option<&str>,
+    branch: Option<&str>,
+    repos: &[String],
+) -> Result<ExitCode> {
+    let usage = "octok up --branch <branch>";
+    let (project_name, workspace) = target_workspace(registry, explicit_project, branch, usage)?;
+    let project = registry.load_project(&project_name)?;
+    let running = start_workspace(registry.home(), &project, &workspace, &as_strs(repos))?;
+    let interrupted = stop_on_signal(running.stopper());
+    let labels = up_labels(&project, running.started());
+    let all_succeeded = running.wait(|event| {
+        print_up_event(&labels, event, interrupted.load(Ordering::SeqCst));
+    });
+    Ok(if interrupted.load(Ordering::SeqCst) {
+        ExitCode::from(INTERRUPTED)
+    } else if all_succeeded {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
+}
+
+/// Asks for a stop at Ctrl-C, and when octok is told to end or loses its terminal.
+/// Returns the flag that says whether that happened.
+fn stop_on_signal(stopper: Stopper) -> Arc<AtomicBool> {
+    let interrupted = Arc::new(AtomicBool::new(false));
+    let mut signals =
+        Signals::new([SIGINT, SIGTERM, SIGHUP]).expect("signal handlers can be installed");
+    let flag = Arc::clone(&interrupted);
+    thread::spawn(move || {
+        for _signal in signals.forever() {
+            let first = !flag.swap(true, Ordering::SeqCst);
+            stopper.stop();
+            if first {
+                // The terminal may be the thing that just went away.
+                let _ = writeln!(io::stderr(), "stopping...");
+            }
+        }
+    });
+    interrupted
+}
+
+/// Project and workspace a command acts on: the ones of `branch`, else the ones that
+/// contain the current directory. `usage` shows how to pass the branch.
+fn target_workspace(
+    registry: &Registry,
+    explicit_project: Option<&str>,
+    branch: Option<&str>,
+    usage: &'static str,
+) -> Result<(String, String)> {
+    match branch {
+        Some(branch) => Ok((
+            registry.resolve_project(explicit_project)?,
+            workspace_name(branch),
+        )),
+        None => std::env::current_dir()
+            .ok()
+            .and_then(|dir| locate_workspace(registry.home(), &dir))
+            .ok_or(Error::NotInWorkspace(usage)),
+    }
+}
+
+fn as_strs(values: &[String]) -> Vec<&str> {
+    values.iter().map(String::as_str).collect()
 }
 
 /// `--location` connects to the machine once, to find the octok home there.
@@ -535,14 +724,6 @@ fn remember_passphrases(hosts: &[String]) -> Result<()> {
         }
     }
     Ok(())
-}
-
-/// The workspace that contains the current directory.
-fn current_workspace(home: &Home) -> Result<(String, String)> {
-    std::env::current_dir()
-        .ok()
-        .and_then(|dir| locate_workspace(home, &dir))
-        .ok_or(Error::NotInWorkspace)
 }
 
 /// Asks only at a terminal: scripts and agents get the error instead of a question nobody answers.

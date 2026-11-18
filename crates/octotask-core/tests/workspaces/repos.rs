@@ -1,8 +1,8 @@
 use std::fs;
 
 use octotask_core::{
-    Error, NewRepo, RepoChanges, create_workspace, fetch_repos, register_repo, unregister_repo,
-    update_repo,
+    Error, NewRepo, RepoChanges, create_workspace, fetch_repos, register_repo, set_workspace_run,
+    unregister_repo, update_repo,
 };
 
 use super::{Fixture, PROJECT, commit_on, git, head, keep_project_base, refuse_missing_base};
@@ -211,7 +211,7 @@ fn unregister_repo_used_by_a_workspace_is_refused() {
         keep_project_base,
     )
     .unwrap();
-    create_workspace(&fx.registry(), PROJECT, "feat/login", None).unwrap();
+    create_workspace(&fx.registry(), PROJECT, "feat/login", None, false).unwrap();
 
     let err = unregister_repo(&fx.registry(), PROJECT, "frontend").unwrap_err();
 
@@ -595,4 +595,37 @@ fn register_repo_with_a_chosen_base_that_is_not_a_branch_name_registers_nothing(
     assert!(matches!(err, Error::InvalidName { .. }), "{err:?}");
     assert!(fx.project().repos.is_empty());
     assert!(!fx.cache_dir("frontend").exists());
+}
+
+#[test]
+fn the_run_command_of_a_repo_can_be_set_for_one_workspace() {
+    let fx = Fixture::new();
+    fx.register(&fx.remote("frontend"));
+    fx.registry()
+        .update_project(PROJECT, |project| project.set_alias("frontend", "web"))
+        .unwrap();
+    let run = |workspace: &str| {
+        fx.project()
+            .effective_run("frontend", workspace)
+            .map(str::to_string)
+    };
+
+    let key = set_workspace_run(
+        &fx.registry(),
+        PROJECT,
+        "web",
+        "feat/login",
+        Some("npm run dev"),
+    )
+    .unwrap();
+    assert_eq!(key, "frontend");
+    assert_eq!(run("feat-login").as_deref(), Some("npm run dev"));
+    assert_eq!(run("feat-other"), None);
+
+    set_workspace_run(&fx.registry(), PROJECT, "web", "feat/login", None).unwrap();
+    assert_eq!(run("feat-login"), None);
+
+    let err =
+        set_workspace_run(&fx.registry(), PROJECT, "nope", "feat/login", Some("x")).unwrap_err();
+    assert!(matches!(err, Error::RepoNotFound(_)), "{err:?}");
 }
