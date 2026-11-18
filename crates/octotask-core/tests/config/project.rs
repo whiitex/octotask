@@ -437,3 +437,131 @@ fn location_of_an_unknown_repo_is_refused() {
         .unwrap_err();
     assert!(matches!(err, Error::RepoNotFound(_)), "{err:?}");
 }
+
+fn project_with_backend() -> Project {
+    let mut project = Project::new("deeptree", "main").unwrap();
+    project
+        .add_repo("git@github.com:org/backend.git", None, None)
+        .unwrap();
+    project
+}
+
+#[test]
+fn setup_and_run_commands_of_a_repo_can_be_set_and_cleared() {
+    let mut project = project_with_backend();
+    assert_eq!(project.repos["backend"].setup, None);
+    assert_eq!(project.effective_run("backend", "feat-login"), None);
+
+    project.set_repo_setup("backend", Some("uv sync")).unwrap();
+    project
+        .set_repo_run("backend", Some("uv run main.py"))
+        .unwrap();
+    assert_eq!(project.repos["backend"].setup.as_deref(), Some("uv sync"));
+    assert_eq!(
+        project.effective_run("backend", "feat-login"),
+        Some("uv run main.py")
+    );
+
+    project.set_repo_setup("backend", None).unwrap();
+    project.set_repo_run("backend", None).unwrap();
+    assert_eq!(project.repos["backend"].setup, None);
+    assert_eq!(project.effective_run("backend", "feat-login"), None);
+}
+
+#[test]
+fn run_command_of_a_workspace_overrides_the_one_of_the_repo() {
+    let mut project = project_with_backend();
+    project
+        .set_repo_run("backend", Some("PORT=9005 uv run main.py"))
+        .unwrap();
+
+    project
+        .set_workspace_run("feat-login", "backend", Some("PORT=9008 uv run main.py"))
+        .unwrap();
+    assert_eq!(
+        project.effective_run("backend", "feat-login"),
+        Some("PORT=9008 uv run main.py")
+    );
+    assert_eq!(
+        project.effective_run("backend", "feat-other"),
+        Some("PORT=9005 uv run main.py")
+    );
+
+    project
+        .set_workspace_run("feat-login", "backend", None)
+        .unwrap();
+    assert_eq!(
+        project.effective_run("backend", "feat-login"),
+        Some("PORT=9005 uv run main.py")
+    );
+    assert!(project.workspaces.is_empty());
+}
+
+#[test]
+fn blank_commands_are_rejected_and_change_nothing() {
+    let mut project = project_with_backend();
+    let before = project.clone();
+
+    for command in ["", "  \n"] {
+        let errors = [
+            project.set_repo_setup("backend", Some(command)),
+            project.set_repo_run("backend", Some(command)),
+            project.set_workspace_run("feat-login", "backend", Some(command)),
+        ];
+        for err in errors.map(Result::unwrap_err) {
+            assert!(matches!(err, Error::InvalidName { .. }), "{err:?}");
+        }
+    }
+    assert_eq!(project, before);
+}
+
+#[test]
+fn commands_of_an_unknown_repo_are_refused() {
+    let mut project = project_with_backend();
+
+    let errors = [
+        project.set_repo_setup("nope", Some("uv sync")),
+        project.set_repo_run("nope", Some("uv run main.py")),
+        project.set_workspace_run("feat-login", "nope", Some("uv run main.py")),
+    ];
+    for err in errors.map(Result::unwrap_err) {
+        assert!(matches!(err, Error::RepoNotFound(_)), "{err:?}");
+    }
+    assert!(project.workspaces.is_empty());
+}
+
+#[test]
+fn a_workspace_keeps_its_run_commands_when_its_location_is_cleared() {
+    let mut project = project_with_backend();
+    project
+        .set_workspace_location("feat-login", Some(remote_location("vm")))
+        .unwrap();
+    project
+        .set_workspace_run("feat-login", "backend", Some("uv run main.py"))
+        .unwrap();
+
+    project.set_workspace_location("feat-login", None).unwrap();
+    assert_eq!(
+        project.effective_run("backend", "feat-login"),
+        Some("uv run main.py")
+    );
+    assert_eq!(
+        project.effective_location(&project.repos["backend"], Some("feat-login")),
+        &Location::Local
+    );
+
+    project.forget_workspace("feat-login");
+    assert!(project.workspaces.is_empty());
+}
+
+#[test]
+fn removing_a_repo_forgets_its_run_commands_in_the_workspaces() {
+    let mut project = project_with_backend();
+    project
+        .set_workspace_run("feat-login", "backend", Some("uv run main.py"))
+        .unwrap();
+
+    project.remove_repo("backend").unwrap();
+
+    assert!(project.workspaces.is_empty());
+}

@@ -475,3 +475,62 @@ fn a_hand_edited_location_is_checked_on_load() {
     assert!(matches!(err, Error::Parse { .. }), "{err:?}");
     assert!(err.to_string().contains("api-dev-1"), "{err}");
 }
+
+#[test]
+fn commands_are_written_only_when_set_and_survive_a_reload() {
+    let (_dir, reg) = registry();
+    reg.init_project("deeptree", "main").unwrap();
+    reg.update_project("deeptree", |p| {
+        p.add_repo("git@github.com:org/backend.git", None, None)
+    })
+    .unwrap();
+    let path = reg.home().project_file("deeptree");
+    let raw = fs::read_to_string(&path).unwrap();
+    assert!(!raw.contains("setup"), "{raw}");
+    assert!(!raw.contains("run"), "{raw}");
+
+    reg.update_project("deeptree", |p| {
+        p.set_repo_setup("backend", Some("uv sync"))?;
+        p.set_repo_run("backend", Some("PORT=9005 uv run main.py"))?;
+        p.set_workspace_run("feat-login", "backend", Some("PORT=9008 uv run main.py"))
+    })
+    .unwrap();
+
+    let raw = fs::read_to_string(&path).unwrap();
+    assert!(raw.contains("    setup: uv sync\n"), "{raw}");
+    assert!(raw.contains("    run: PORT=9005 uv run main.py\n"), "{raw}");
+    assert!(
+        raw.contains(
+            "workspaces:\n  feat-login:\n    repos:\n      backend:\n        run: PORT=9008 uv run main.py\n"
+        ),
+        "{raw}"
+    );
+    let loaded = reg.load_project("deeptree").unwrap();
+    assert_eq!(loaded.repos["backend"].setup.as_deref(), Some("uv sync"));
+    assert_eq!(
+        loaded.effective_run("backend", "feat-login"),
+        Some("PORT=9008 uv run main.py")
+    );
+}
+
+#[test]
+fn hand_edited_commands_are_checked_on_load() {
+    let (_dir, reg) = registry();
+    reg.init_project("deeptree", "main").unwrap();
+    reg.update_project("deeptree", |p| {
+        p.add_repo("git@github.com:org/backend.git", None, None)
+    })
+    .unwrap();
+    let path = reg.home().project_file("deeptree");
+    let raw = fs::read_to_string(&path).unwrap();
+
+    fs::write(&path, format!("{raw}    run: ''\n")).unwrap();
+    let err = reg.load_project("deeptree").unwrap_err();
+    assert!(matches!(err, Error::InvalidName { .. }), "{err:?}");
+
+    let unknown_repo =
+        "workspaces:\n  feat-login:\n    repos:\n      nope:\n        run: uv run main.py\n";
+    fs::write(&path, format!("{raw}{unknown_repo}")).unwrap();
+    let err = reg.load_project("deeptree").unwrap_err();
+    assert!(matches!(err, Error::RepoNotFound(_)), "{err:?}");
+}

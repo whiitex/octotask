@@ -36,13 +36,37 @@ pub struct Repo {
     /// Where this repo lives, overriding the project's location.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub location: Option<Location>,
+    /// Shell command that prepares a checkout before its first run, e.g. `npm ci`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup: Option<String>,
+    /// Shell command that starts the repo, run in its checkout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceSettings {
     /// Where every repo of the workspace lives, whatever the repos and the project say.
-    pub location: Location,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<Location>,
+    /// Settings of single repos in this workspace, by repo key.
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub repos: IndexMap<String, WorkspaceRepo>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceRepo {
+    /// Shell command that starts the repo in this workspace, instead of the repo's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<String>,
+}
+
+impl WorkspaceSettings {
+    fn is_empty(&self) -> bool {
+        self.location.is_none() && self.repos.is_empty()
+    }
 }
 
 impl Project {
@@ -96,6 +120,8 @@ impl Project {
                 url: url.trim().to_string(),
                 base: base.map(str::to_string),
                 location: None,
+                setup: None,
+                run: None,
             },
         );
         Ok(key)
@@ -161,14 +187,62 @@ impl Project {
         validate_workspace_name(workspace)?;
         match location {
             Some(location) => {
-                let settings = WorkspaceSettings { location };
-                self.workspaces.insert(workspace.to_string(), settings);
+                let settings = self.workspaces.entry(workspace.to_string()).or_default();
+                settings.location = Some(location);
             }
             None => {
-                self.workspaces.shift_remove(workspace);
+                if let Some(settings) = self.workspaces.get_mut(workspace) {
+                    settings.location = None;
+                }
+                self.drop_workspace_without_settings(workspace);
             }
         }
         Ok(())
+    }
+
+    /// Sets the command that prepares a checkout of the repo. `None` removes it.
+    pub fn set_repo_setup(&mut self, key: &str, command: Option<&str>) -> Result<()> {
+        let repo = self.repo_mut(key)?;
+        repo.setup = checked_command("setup command", command)?;
+        Ok(())
+    }
+
+    /// Sets the command that starts the repo. `None` removes it.
+    pub fn set_repo_run(&mut self, key: &str, command: Option<&str>) -> Result<()> {
+        let repo = self.repo_mut(key)?;
+        repo.run = checked_command("run command", command)?;
+        Ok(())
+    }
+
+    /// Sets the command that starts one repo in one workspace. `None` goes back to the repo's.
+    pub fn set_workspace_run(
+        &mut self,
+        workspace: &str,
+        key: &str,
+        command: Option<&str>,
+    ) -> Result<()> {
+        validate_workspace_name(workspace)?;
+        if !self.repos.contains_key(key) {
+            return Err(Error::RepoNotFound(key.to_string()));
+        }
+        match checked_command("run command", command)? {
+            Some(run) => {
+                let settings = self.workspaces.entry(workspace.to_string()).or_default();
+                settings.repos.entry(key.to_string()).or_default().run = Some(run);
+            }
+            None => {
+                if let Some(settings) = self.workspaces.get_mut(workspace) {
+                    settings.repos.shift_remove(key);
+                }
+                self.drop_workspace_without_settings(workspace);
+            }
+        }
+        Ok(())
+    }
+
+    /// Forgets every setting one workspace has of its own.
+    pub fn forget_workspace(&mut self, workspace: &str) {
+        self.workspaces.shift_remove(workspace);
     }
 
     /// Key of the repo that `name` refers to, as a key or as an alias.
@@ -181,9 +255,15 @@ impl Project {
     }
 
     pub fn remove_repo(&mut self, key: &str) -> Result<Repo> {
-        self.repos
+        let repo = self
+            .repos
             .shift_remove(key)
-            .ok_or_else(|| Error::RepoNotFound(key.to_string()))
+            .ok_or_else(|| Error::RepoNotFound(key.to_string()))?;
+        self.workspaces.retain(|_, settings| {
+            settings.repos.shift_remove(key);
+            !settings.is_empty()
+        });
+        Ok(repo)
     }
 
     /// Base branch for a repo: its own override, else the project base.
@@ -200,10 +280,19 @@ impl Project {
     ) -> &'a Location {
         workspace
             .and_then(|name| self.workspaces.get(name))
-            .map(|settings| &settings.location)
+            .and_then(|settings| settings.location.as_ref())
             .or(repo.location.as_ref())
             .or(self.location.as_ref())
             .unwrap_or(&LOCAL)
+    }
+
+    /// Command that starts a repo in a workspace: the override of the workspace, else the repo's.
+    pub fn effective_run(&self, key: &str, workspace: &str) -> Option<&str> {
+        self.workspaces
+            .get(workspace)
+            .and_then(|settings| settings.repos.get(key))
+            .and_then(|repo| repo.run.as_deref())
+            .or_else(|| self.repos.get(key)?.run.as_deref())
     }
 
     /// Every machine the project can have folders on, each one once, the project's own first.
@@ -213,7 +302,10 @@ impl Project {
             .repos
             .values()
             .filter_map(|repo| repo.location.as_ref());
-        let workspaces = self.workspaces.values().map(|settings| &settings.location);
+        let workspaces = self
+            .workspaces
+            .values()
+            .filter_map(|settings| settings.location.as_ref());
         let mut locations: Vec<Location> = Vec::new();
         for location in std::iter::once(project).chain(repos).chain(workspaces) {
             if !locations.contains(location) {
@@ -232,7 +324,15 @@ impl Project {
         }
         for (name, settings) in &self.workspaces {
             validate_workspace_name(name)?;
-            settings.location.validate()?;
+            if let Some(location) = &settings.location {
+                location.validate()?;
+            }
+            for (key, repo) in &settings.repos {
+                if !self.repos.contains_key(key) {
+                    return Err(Error::RepoNotFound(key.clone()));
+                }
+                checked_command("run command", repo.run.as_deref())?;
+            }
         }
         for (key, repo) in &self.repos {
             validate_ident("repo key", key)?;
@@ -247,6 +347,8 @@ impl Project {
             if let Some(location) = &repo.location {
                 location.validate()?;
             }
+            checked_command("setup command", repo.setup.as_deref())?;
+            checked_command("run command", repo.run.as_deref())?;
         }
         Ok(())
     }
@@ -255,6 +357,16 @@ impl Project {
         self.repos
             .get_mut(key)
             .ok_or_else(|| Error::RepoNotFound(key.to_string()))
+    }
+
+    fn drop_workspace_without_settings(&mut self, workspace: &str) {
+        if self
+            .workspaces
+            .get(workspace)
+            .is_some_and(WorkspaceSettings::is_empty)
+        {
+            self.workspaces.shift_remove(workspace);
+        }
     }
 
     /// Keys and aliases share one namespace, so a name always points to one repo.
@@ -347,6 +459,18 @@ pub(crate) fn validate_ident(kind: &'static str, value: &str) -> Result<()> {
         return fail("may only contain letters, digits, `.`, `_` and `-`");
     }
     Ok(())
+}
+
+/// A command is handed to a shell as it is: only an empty one is surely a mistake.
+fn checked_command(kind: &'static str, command: Option<&str>) -> Result<Option<String>> {
+    match command {
+        Some(command) if command.trim().is_empty() => Err(Error::InvalidName {
+            kind,
+            value: command.to_string(),
+            reason: "must not be empty",
+        }),
+        command => Ok(command.map(str::to_string)),
+    }
 }
 
 /// A workspace is named after its branch, with `/` replaced: the name is one folder.

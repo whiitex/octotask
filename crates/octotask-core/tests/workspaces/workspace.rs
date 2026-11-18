@@ -597,13 +597,28 @@ fn a_workspace_keeps_its_own_location_until_it_is_removed() {
     )
     .unwrap();
     assert_eq!(
-        placed().map(|settings| settings.location),
+        placed().and_then(|settings| settings.location),
         Some(Location::Local)
     );
 
     remove_workspace(&fx.registry(), PROJECT, "feat/login", false).unwrap();
     assert_eq!(placed(), None);
     assert!(fx.cache_dir("frontend").is_dir());
+}
+
+#[test]
+fn removing_a_workspace_forgets_its_run_commands() {
+    let fx = fixture_with_repos(&["frontend"]);
+    create_workspace(&fx.registry(), PROJECT, "feat/login", None).unwrap();
+    fx.registry()
+        .update_project(PROJECT, |project| {
+            project.set_workspace_run("feat-login", "frontend", Some("npm run dev"))
+        })
+        .unwrap();
+
+    remove_workspace(&fx.registry(), PROJECT, "feat/login", false).unwrap();
+
+    assert!(fx.project().workspaces.is_empty());
 }
 
 #[test]

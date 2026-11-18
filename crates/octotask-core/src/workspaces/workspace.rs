@@ -112,7 +112,7 @@ pub fn create_workspace(
 /// Returns the workspace name. Refused when that would lose work, unless `force`.
 ///
 /// Also cleans up what a folder deleted by hand left in the caches, and forgets the
-/// location the workspace had of its own.
+/// settings the workspace had of its own.
 pub fn remove_workspace(
     registry: &Registry,
     project_name: &str,
@@ -122,11 +122,12 @@ pub fn remove_workspace(
     let project = registry.load_project(project_name)?;
     let name = workspace_name(branch);
     match remove_worktrees_of_project(registry.home(), &project, branch, force) {
-        // Only the location of the workspace was left to forget.
+        // Only the settings of the workspace were left to forget.
         Err(Error::WorkspaceNotFound(_)) if project.workspaces.contains_key(&name) => {}
         removed => drop(removed?),
     }
     forget_placement(registry, &project, &name)?;
+    forget_commands(registry, &project, &name)?;
     Ok(name)
 }
 
@@ -142,7 +143,7 @@ fn place_workspace(
     let placed_there = project
         .workspaces
         .get(name)
-        .is_some_and(|settings| &settings.location == location);
+        .is_some_and(|settings| settings.location.as_ref() == Some(location));
     if placed_there {
         return Ok((project, false));
     }
@@ -163,10 +164,10 @@ fn place_workspace(
 /// Forgets the location a workspace had of its own, and deletes the caches cloned there
 /// only for it.
 fn forget_placement(registry: &Registry, project: &Project, name: &str) -> Result<()> {
-    let Some(settings) = project.workspaces.get(name) else {
+    let settings = project.workspaces.get(name);
+    let Some(location) = settings.and_then(|settings| settings.location.as_ref()) else {
         return Ok(());
     };
-    let location = &settings.location;
     let remaining = registry.update_project(&project.name, |project| {
         project.set_workspace_location(name, None)?;
         Ok(project.clone())
@@ -174,11 +175,23 @@ fn forget_placement(registry: &Registry, project: &Project, name: &str) -> Resul
     let used_by_a_workspace = remaining
         .workspaces
         .values()
-        .any(|settings| &settings.location == location);
+        .any(|settings| settings.location.as_ref() == Some(location));
     for (key, repo) in &remaining.repos {
         if !used_by_a_workspace && remaining.effective_location(repo, None) != location {
             Cache::new(registry.home(), location, &remaining.name, key).remove()?;
         }
+    }
+    Ok(())
+}
+
+/// Forgets the commands a workspace had of its own.
+fn forget_commands(registry: &Registry, project: &Project, name: &str) -> Result<()> {
+    let settings = project.workspaces.get(name);
+    if settings.is_some_and(|settings| !settings.repos.is_empty()) {
+        registry.update_project(&project.name, |project| {
+            project.forget_workspace(name);
+            Ok(())
+        })?;
     }
     Ok(())
 }
