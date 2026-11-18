@@ -62,14 +62,15 @@ exec 3<&-
 
 # Runs a command to its end and leaves its exit status in `$status`.
 # A trapped signal ends `wait` early, with the command still running.
+# `dash` writes `Terminated` for a command that a signal ended: octok reports that itself.
 supervised() {
     printf '$ %s\n' "$1"
     sh -c "$1" </dev/null &
     command=$!
-    wait "$command"
+    wait "$command" 2>/dev/null
     status=$?
     while kill -0 "$command" 2>/dev/null; do
-        wait "$command"
+        wait "$command" 2>/dev/null
         status=$?
     done
 }

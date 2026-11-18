@@ -111,7 +111,7 @@ fn ssh_shares_one_connection_and_never_asks_without_a_terminal() {
             "-o ControlMaster=auto",
             "-o ControlPersist=60",
             "-o BatchMode=yes",
-            "-- vm env GIT_TERMINAL_PROMPT=0 git -C ",
+            "-- vm exec env GIT_TERMINAL_PROMPT=0 git -C ",
         ] {
             assert!(log.contains(expected), "missing {expected:?} in: {log}");
         }

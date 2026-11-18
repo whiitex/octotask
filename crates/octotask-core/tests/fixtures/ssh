@@ -24,4 +24,7 @@ if [ "$host" = "unreachable" ]; then
     exit 255
 fi
 
-cd "$FAKE_SSH_HOME" && exec sh -c "$*"
+# The shell stays the parent of the command unless the command is an `exec`, as the
+# `dash` of Ubuntu does: the `exit` keeps any `sh` from replacing itself on its own.
+cd "$FAKE_SSH_HOME" && exec sh -c "$*
+exit \$?"

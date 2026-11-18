@@ -167,10 +167,13 @@ pub(super) fn command(
 }
 
 /// sshd hands the command to the remote user's shell as one string, so every word is quoted.
+///
+/// `exec` makes that shell become the program: a shell left as its parent, as `dash` is,
+/// would be in the process group that supervised commands signal, and die of it.
 fn remote_command_line(program: &str, dir: Option<&Path>, args: &[&str]) -> String {
     let dir = dir.map(|dir| dir.to_string_lossy());
     // Fail instead of waiting for a password nobody may be there to type.
-    let mut words = vec!["env", "GIT_TERMINAL_PROMPT=0", program];
+    let mut words = vec!["exec", "env", "GIT_TERMINAL_PROMPT=0", program];
     if let Some(dir) = &dir {
         words.extend(["-C", dir]);
     }
