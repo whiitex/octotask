@@ -4,7 +4,7 @@ use std::os::unix::process::ExitStatusExt;
 use std::process::{ExitCode, ExitStatus};
 
 use octotask_core::{
-    Checkout, Commit, Project, PullOutcome, Result, Status, UpEvent, WorkspaceStatus,
+    Checkout, Commit, DevChanges, Project, PullOutcome, Result, Status, UpEvent, WorkspaceStatus,
 };
 use serde_json::json;
 use signal_hook::consts::SIGKILL;
@@ -151,6 +151,26 @@ fn how_it_ended(status: ExitStatus, stopping: bool) -> String {
         (true, Some(SIGKILL)) => "killed: it was still running 10 seconds after the stop".into(),
         (true, _) => "stopped".into(),
         (false, _) => format!("ended ({status})"),
+    }
+}
+
+/// Lists what is saved of the dev changes of each repo, with the diff of the tracked
+/// files when `with_diff`. The files git does not track are only named: they hold secrets.
+pub(crate) fn print_dev_changes(project: &Project, repos: &[DevChanges], with_diff: bool) {
+    for changes in repos {
+        println!("{}", project_repo_label(project, &changes.repo));
+        if changes.changed.is_empty() && changes.new.is_empty() {
+            println!("  no dev changes");
+        }
+        for path in &changes.changed {
+            println!("  changed  {path}");
+        }
+        for path in &changes.new {
+            println!("  new      {path}");
+        }
+        if with_diff && !changes.diff.is_empty() {
+            println!("\n{}\n", changes.diff);
+        }
     }
 }
 

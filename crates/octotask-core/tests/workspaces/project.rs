@@ -6,7 +6,7 @@ use super::{Fixture, PROJECT};
 fn remove_project_deletes_the_project_file_and_its_caches() {
     let fx = Fixture::new();
     fx.register(&fx.remote("frontend"));
-    create_workspace(&fx.registry(), PROJECT, "feat/login", None).unwrap();
+    create_workspace(&fx.registry(), PROJECT, "feat/login", None, false).unwrap();
     remove_workspace(&fx.registry(), PROJECT, "feat/login", false).unwrap();
 
     remove_project(&fx.registry(), PROJECT, false).unwrap();
@@ -20,7 +20,7 @@ fn remove_project_deletes_the_project_file_and_its_caches() {
 fn remove_project_is_refused_while_it_has_workspaces() {
     let fx = Fixture::new();
     fx.register(&fx.remote("frontend"));
-    create_workspace(&fx.registry(), PROJECT, "feat/login", None).unwrap();
+    create_workspace(&fx.registry(), PROJECT, "feat/login", None, false).unwrap();
 
     let err = remove_project(&fx.registry(), PROJECT, false).unwrap_err();
 
@@ -37,7 +37,7 @@ fn remove_project_is_refused_while_it_has_workspaces() {
 fn remove_project_with_force_deletes_its_workspaces_too() {
     let fx = Fixture::new();
     fx.register(&fx.remote("frontend"));
-    create_workspace(&fx.registry(), PROJECT, "feat/login", None).unwrap();
+    create_workspace(&fx.registry(), PROJECT, "feat/login", None, false).unwrap();
 
     remove_project(&fx.registry(), PROJECT, true).unwrap();
 

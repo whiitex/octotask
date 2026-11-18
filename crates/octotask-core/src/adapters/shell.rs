@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::Duration;
 
-use super::utils::{Place, spawn_piped};
-use crate::{Location, Result};
+use super::utils::{Place, run_checked, spawn_piped};
+use crate::{Error, Location, Result};
 
 /// Runs the commands of a repo in the directory `$1`: the setup `$3` if it is due, then
 /// `$2`. It stops them when stdin closes: that is how octok asks for a stop, and what
@@ -137,6 +137,32 @@ pub(crate) fn supervise(
         lifeline,
         output,
         process,
+    })
+}
+
+/// Runs a `sh` script on the machine of `location` and returns what it printed.
+/// `name` stands for the text of the script in an error.
+pub(crate) fn run_script(
+    location: &Location,
+    name: &'static str,
+    script: &str,
+    args: &[&str],
+) -> Result<String> {
+    let mut all = vec!["-c", script, "sh"];
+    all.extend(args);
+    run_checked("sh", Place::machine(location), &all).map_err(|error| match error {
+        Error::CommandFailed {
+            dir,
+            status,
+            stderr,
+            ..
+        } => Error::CommandFailed {
+            command: format!("sh ({name})"),
+            dir,
+            status,
+            stderr,
+        },
+        other => other,
     })
 }
 

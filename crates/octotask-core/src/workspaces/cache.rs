@@ -1,6 +1,6 @@
 use std::fs::{self, File};
 use std::io::{self, IsTerminal};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::adapters::Files;
 use crate::utils::lock_exclusive;
@@ -53,6 +53,10 @@ impl Cache {
 
     pub(crate) fn git(&self) -> Git {
         Git::at(&self.location, &self.dir)
+    }
+
+    pub(crate) fn dir(&self) -> &Path {
+        &self.dir
     }
 
     pub(crate) fn exists(&self) -> Result<bool> {

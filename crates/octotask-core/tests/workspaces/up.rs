@@ -27,7 +27,7 @@ fn workspace_with_commands(repos: &[(&str, Option<&str>)]) -> Fixture {
                 .try_for_each(|(name, run)| project.set_repo_run(name, *run))
         })
         .unwrap();
-    create_workspace(&fx.registry(), PROJECT, "feat/login", None).unwrap();
+    create_workspace(&fx.registry(), PROJECT, "feat/login", None, false).unwrap();
     fx
 }
 

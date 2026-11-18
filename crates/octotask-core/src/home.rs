@@ -78,4 +78,17 @@ impl Home {
     pub fn workspace_dir(&self, project: &str, workspace: &str) -> PathBuf {
         self.workspaces_dir(project).join(workspace)
     }
+
+    pub fn dev_changes_root(&self) -> PathBuf {
+        self.root.join("dev")
+    }
+
+    pub fn dev_changes_dirs(&self, project: &str) -> PathBuf {
+        self.dev_changes_root().join(project)
+    }
+
+    /// The dev changes saved for a repo: what every new checkout of it gets.
+    pub fn dev_changes_dir(&self, project: &str, repo: &str) -> PathBuf {
+        self.dev_changes_dirs(project).join(repo)
+    }
 }

@@ -211,7 +211,7 @@ fn unregister_repo_used_by_a_workspace_is_refused() {
         keep_project_base,
     )
     .unwrap();
-    create_workspace(&fx.registry(), PROJECT, "feat/login", None).unwrap();
+    create_workspace(&fx.registry(), PROJECT, "feat/login", None, false).unwrap();
 
     let err = unregister_repo(&fx.registry(), PROJECT, "frontend").unwrap_err();
 

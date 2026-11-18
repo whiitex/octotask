@@ -3,7 +3,7 @@ use std::process::ExitStatus;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
-use super::workspace::{Member, members_of_existing};
+use super::workspace::{Member, chosen_keys, members_of_existing};
 use crate::adapters::{Commands, Lifeline, Supervised, supervise};
 use crate::{Error, Home, Project, Result};
 
@@ -131,7 +131,12 @@ fn repos_to_run<'a>(
     repos: &[&str],
 ) -> Result<Vec<(Member<'a>, Commands<'a>)>> {
     let members = members_of_existing(home, project, workspace)?;
-    let chosen = chosen_repos(project, workspace, repos)?;
+    let chosen = chosen_keys(project, repos)?;
+    for key in chosen.iter().flatten() {
+        if project.effective_run(key, workspace).is_none() {
+            return Err(Error::NoRunCommand(key.to_string()));
+        }
+    }
     let mut to_run = Vec::new();
     for member in members {
         let Some(run) = project.effective_run(member.key, workspace) else {
@@ -156,27 +161,6 @@ fn repos_to_run<'a>(
         return Err(Error::NothingToRun(workspace.to_string()));
     }
     Ok(to_run)
-}
-
-/// Keys of the repos named by key or alias, each of which must have a `run` command.
-/// `None` when no repo is named.
-fn chosen_repos<'a>(
-    project: &'a Project,
-    workspace: &str,
-    repos: &[&str],
-) -> Result<Option<Vec<&'a str>>> {
-    if repos.is_empty() {
-        return Ok(None);
-    }
-    let mut keys = Vec::new();
-    for name in repos {
-        let key = project.resolve_repo(name)?;
-        if project.effective_run(key, workspace).is_none() {
-            return Err(Error::NoRunCommand(key.to_string()));
-        }
-        keys.push(key);
-    }
-    Ok(Some(keys))
 }
 
 /// Reports the output and the end of the commands of a repo, from a thread of its own.

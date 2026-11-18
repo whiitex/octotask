@@ -11,6 +11,6 @@ mod utils;
 pub(crate) use files::Files;
 pub use gh::Gh;
 pub use git::{Commit, Git, OriginBranches, origin_ref};
-pub(crate) use shell::{Commands, Lifeline, Supervised, supervise};
+pub(crate) use shell::{Commands, Lifeline, Supervised, run_script, supervise};
 pub use ssh::{Ssh, SshSettings, resolve_location};
 pub use ssh_config::ssh_config_hosts;

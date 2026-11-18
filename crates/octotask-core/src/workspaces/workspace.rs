@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use super::cache::{Cache, orphan_caches};
+use super::dev::Store;
 use crate::adapters::{Files, origin_ref};
 use crate::config::validate_branch;
 use crate::{Commit, Error, Git, Home, Location, Project, Registry, Repo, Result};
@@ -88,20 +89,26 @@ pub enum PullOutcome {
 ///
 /// With a `location`, every repo of the workspace lives there, whatever the repos and the
 /// project say. The choice is saved in the project until the workspace is removed.
+///
+/// Every new checkout gets the dev changes saved for its repo. Nothing is created when
+/// some of them no longer apply to the commit a checkout starts from, unless
+/// `allow_stale_dev`: the files they are for are then left as they are in git.
 pub fn create_workspace(
     registry: &Registry,
     project_name: &str,
     branch: &str,
     location: Option<&Location>,
+    allow_stale_dev: bool,
 ) -> Result<NewWorkspace> {
     validate_branch(branch)?;
     let name = workspace_name(branch);
+    let home = registry.home();
     let Some(location) = location else {
         let project = registry.load_project(project_name)?;
-        return add_worktrees_of_project(registry.home(), &project, branch);
+        return add_worktrees_of_project(home, &project, branch, allow_stale_dev);
     };
     let (project, newly_placed) = place_workspace(registry, project_name, &name, location)?;
-    add_worktrees_of_project(registry.home(), &project, branch).inspect_err(|_| {
+    add_worktrees_of_project(home, &project, branch, allow_stale_dev).inspect_err(|_| {
         if newly_placed {
             let _ = forget_placement(registry, &project, &name);
         }
@@ -196,7 +203,12 @@ fn forget_commands(registry: &Registry, project: &Project, name: &str) -> Result
     Ok(())
 }
 
-fn add_worktrees_of_project(home: &Home, project: &Project, branch: &str) -> Result<NewWorkspace> {
+fn add_worktrees_of_project(
+    home: &Home,
+    project: &Project,
+    branch: &str,
+    allow_stale_dev: bool,
+) -> Result<NewWorkspace> {
     if project.repos.is_empty() {
         return Err(Error::NoRepos(project.name.clone()));
     }
@@ -209,6 +221,7 @@ fn add_worktrees_of_project(home: &Home, project: &Project, branch: &str) -> Res
     }
     fetch_all(&members)?;
     let plan = plan_worktrees(project, branch, &members)?;
+    prepare_dev_changes(branch, &plan, allow_stale_dev)?;
     add_worktrees(branch, &plan, &folders)?;
     Ok(new_workspace(path, plan))
 }
@@ -348,6 +361,8 @@ pub(super) struct Member<'a> {
     pub(super) location: Location,
     cache: Cache,
     pub(super) worktree: PathBuf,
+    /// The dev changes saved for the repo on the machine of this checkout.
+    pub(super) dev: Store,
 }
 
 impl Member<'_> {
@@ -376,6 +391,21 @@ pub(super) fn members_of_existing<'a>(
     Ok(members(home, project, workspace))
 }
 
+/// Keys of the repos named by key or alias. `None` when no repo is named: all of them.
+pub(super) fn chosen_keys<'a>(
+    project: &'a Project,
+    names: &[&str],
+) -> Result<Option<Vec<&'a str>>> {
+    if names.is_empty() {
+        return Ok(None);
+    }
+    let keys: Result<Vec<&str>> = names
+        .iter()
+        .map(|name| project.resolve_repo(name))
+        .collect();
+    keys.map(Some)
+}
+
 fn members<'a>(home: &Home, project: &'a Project, workspace: &str) -> Vec<Member<'a>> {
     project
         .repos
@@ -388,6 +418,7 @@ fn members<'a>(home: &Home, project: &'a Project, workspace: &str) -> Vec<Member
                 repo,
                 cache: Cache::new(home, &location, &project.name, key),
                 worktree: folder.join(key),
+                dev: Store::new(home, &location, &project.name, key),
                 location,
             }
         })
@@ -520,6 +551,27 @@ fn base_ref(project: &Project, member: &Member, git: &Git) -> Result<String> {
     }
 }
 
+/// Makes git keep the saved dev changes in the checkouts about to be added.
+/// Fails when some of them no longer apply to the commit a checkout starts from, unless
+/// `allow_stale`.
+fn prepare_dev_changes(branch: &str, plan: &Plan, allow_stale: bool) -> Result<()> {
+    for (member, step) in plan {
+        let rev = match step {
+            Step::Keep => continue,
+            Step::Restore => format!("refs/heads/{branch}"),
+            Step::Create { start_point } => start_point.clone(),
+        };
+        let stale = member.dev.prepare(member.cache.dir(), &rev)?;
+        if !stale.is_empty() && !allow_stale {
+            return Err(Error::StaleDevChanges {
+                repo: member.key.to_string(),
+                files: stale,
+            });
+        }
+    }
+    Ok(())
+}
+
 fn add_worktrees(branch: &str, plan: &Plan, folders: &[Folder]) -> Result<()> {
     for (done, (member, step)) in plan.iter().enumerate() {
         let result = member
@@ -527,7 +579,8 @@ fn add_worktrees(branch: &str, plan: &Plan, folders: &[Folder]) -> Result<()> {
             .lock()
             .and_then(|_lock| add_worktree(member, branch, step));
         if let Err(error) = result {
-            undo_worktrees(&plan[..done], branch, folders);
+            // The one that failed may be half done.
+            undo_worktrees(&plan[..=done], branch, folders);
             return Err(error);
         }
     }
@@ -537,13 +590,16 @@ fn add_worktrees(branch: &str, plan: &Plan, folders: &[Folder]) -> Result<()> {
 fn add_worktree(member: &Member, branch: &str, step: &Step) -> Result<()> {
     let git = member.cache.git();
     match step {
-        Step::Keep => Ok(()),
+        Step::Keep => return Ok(()),
         Step::Restore => {
             git.prune_worktrees()?;
-            git.checkout_worktree(&member.worktree, branch)
+            git.checkout_worktree(&member.worktree, branch)?;
         }
-        Step::Create { start_point } => git.add_worktree(&member.worktree, branch, start_point),
+        Step::Create { start_point } => {
+            git.add_worktree(&member.worktree, branch, start_point)?;
+        }
     }
+    member.dev.copy_new_files(&member.worktree)
 }
 
 /// Best effort: the error that triggered the cleanup is the one worth reporting.

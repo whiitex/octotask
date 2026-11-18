@@ -1,4 +1,5 @@
 use super::cache::Cache;
+use super::dev::Store;
 use super::workspace::{workspace_name, workspaces_with_repo};
 use crate::config::validate_branch;
 use crate::{Error, Home, Location, OriginBranches, Project, Registry, Result};
@@ -130,6 +131,7 @@ pub fn update_repo(
     })?;
     if moves {
         old_cache.remove()?;
+        dev_store(home, &project, &key).remove()?;
     }
     Ok(key)
 }
@@ -159,6 +161,7 @@ pub fn unregister_repo(registry: &Registry, project_name: &str, name: &str) -> R
     refuse_if_in_use(registry.home(), &project, &key)?;
     registry.update_project(project_name, |project| project.remove_repo(&key))?;
     Cache::of_repo(registry.home(), &project, &key, &project.repos[&key]).remove()?;
+    dev_store(registry.home(), &project, &key).remove()?;
     Ok(key)
 }
 
@@ -175,6 +178,12 @@ pub fn fetch_repos(home: &Home, project: &Project) -> Vec<(String, Result<()>)> 
             (key.clone(), result)
         })
         .collect()
+}
+
+/// The dev changes saved for a repo where the project keeps it.
+pub(super) fn dev_store(home: &Home, project: &Project, key: &str) -> Store {
+    let location = project.effective_location(&project.repos[key], None);
+    Store::new(home, location, &project.name, key)
 }
 
 fn refuse_if_in_use(home: &Home, project: &Project, key: &str) -> Result<()> {

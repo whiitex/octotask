@@ -1,4 +1,5 @@
 use super::cache::Cache;
+use super::repos::dev_store;
 use super::workspace::workspace_names;
 use crate::adapters::Files;
 use crate::{Error, Home, Location, Registry, Result};
@@ -22,6 +23,7 @@ pub fn remove_project(registry: &Registry, name: &str, force: bool) -> Result<()
         let home = home.at(location);
         files.remove_dir_all(&home.caches_dir(&name))?;
         files.remove_dir_all(&home.workspaces_dir(&name))?;
+        files.remove_dir_all(&home.dev_changes_dirs(&name))?;
         if location.host().is_some() {
             remove_home_if_empty(&files, &home);
         }
@@ -51,6 +53,7 @@ pub fn set_project_location(
         let stays = project.effective_location(repo, None) == moved.effective_location(repo, None);
         if !stays {
             Cache::of_repo(home, &project, key, repo).remove()?;
+            dev_store(home, &project, key).remove()?;
         }
     }
     Ok(())
@@ -75,7 +78,13 @@ fn refuse_if_it_has_workspaces(
 /// Leaves nothing on another machine once the last project is gone from it.
 /// `rmdir` fails on a folder that still has entries, which is what keeps it.
 fn remove_home_if_empty(files: &Files, home: &Home) {
-    for dir in [home.caches_root(), home.workspaces_root(), home.root()] {
+    let dirs = [
+        home.caches_root(),
+        home.workspaces_root(),
+        home.dev_changes_root(),
+        home.root(),
+    ];
+    for dir in dirs {
         let _ = files.remove_empty_dir(&dir);
     }
 }

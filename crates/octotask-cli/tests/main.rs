@@ -2168,7 +2168,11 @@ fn up_prefixes_every_line_with_its_repo_and_ends_with_the_commands() {
                 .and(predicate::str::contains("backend | oops\n"))
                 .and(predicate::str::contains("docs").not()),
         )
-        .stderr("web     | ended (exit status: 0)\nbackend | ended (exit status: 0)\n");
+        .stderr(
+            predicate::str::contains("web     | ended (exit status: 0)\n").and(
+                predicate::str::contains("backend | ended (exit status: 0)\n"),
+            ),
+        );
 }
 
 #[test]
@@ -2331,4 +2335,161 @@ fn the_commands_on_the_other_machine_stop_when_octok_goes_silent() {
     sleeping.assert_stopped_within(Duration::from_secs(40));
     up.signal("-KILL");
     up.finish();
+}
+
+const APP_PY: &str = "import os\n\n\ndef main():\n    return os.name\n\n\nrun(port=8000)\n";
+
+/// A project whose repo `backend` tracks `app.py`, and the workspace `feat-login`.
+/// `location` is where the repo lives: `None` is this machine.
+fn env_with_app(location: Option<&str>) -> Env {
+    let env = Env::with_repos(&[]);
+    let url = env.remote("backend");
+    commit_file(&env.remote_dir("backend"), "app.py", APP_PY);
+    let mut add = vec!["repo", "add", &url];
+    add.extend(
+        location
+            .iter()
+            .flat_map(|location| ["--location", location]),
+    );
+    env.octok(&add).assert().success();
+    env.octok(&["branch", "feat/login"]).assert().success();
+    env
+}
+
+fn commit_file(repo: &Path, file: &str, content: &str) {
+    fs::write(repo.join(file), content).unwrap();
+    git(repo, &["add", "--all"]);
+    commit(repo, "change a file");
+}
+
+/// Dev changes made in the checkout of `feat-login` are saved, shown, and found again in
+/// a new workspace. `workspaces` is the folder of the workspaces of the project.
+fn assert_dev_changes_reach_a_new_workspace(env: &Env, workspaces: &Path) {
+    let login = workspaces.join("feat-login/backend");
+    fs::write(
+        login.join("app.py"),
+        APP_PY.replace("port=8000", "port=9005"),
+    )
+    .unwrap();
+    fs::write(login.join(".env"), "TOKEN=secret\n").unwrap();
+
+    env.octok(&["dev", "save", "--file", ".env", "--branch", "feat/login"])
+        .assert()
+        .success()
+        .stdout("backend\n  changed  app.py\n  new      .env\n");
+    env.octok(&["dev", "show"]).assert().success().stdout(
+        predicate::str::contains("  changed  app.py\n  new      .env\n")
+            .and(predicate::str::contains(
+                "-run(port=8000)\n+run(port=9005)\n",
+            ))
+            .and(predicate::str::contains("secret").not()),
+    );
+    assert_eq!(git(&login, &["status", "--porcelain"]), "");
+
+    env.octok(&["branch", "feat/other"]).assert().success();
+    let other = workspaces.join("feat-other/backend");
+    let app = fs::read_to_string(other.join("app.py")).unwrap();
+    assert!(app.contains("port=9005"), "{app}");
+    assert_eq!(
+        fs::read_to_string(other.join(".env")).unwrap(),
+        "TOKEN=secret\n"
+    );
+    assert_eq!(git(&other, &["status", "--porcelain"]), "");
+}
+
+#[test]
+fn dev_save_keeps_the_changes_of_a_checkout_for_every_new_workspace() {
+    let env = env_with_app(None);
+
+    assert_dev_changes_reach_a_new_workspace(&env, &env.dir.path().join("workspaces/deeptree"));
+}
+
+#[test]
+fn dev_changes_work_for_a_repo_on_the_other_machine() {
+    let env = env_with_app(Some("vm"));
+
+    assert_dev_changes_reach_a_new_workspace(&env, &env.machine_root().join("workspaces/deeptree"));
+}
+
+#[test]
+fn dev_save_uses_the_workspace_of_the_current_directory_and_says_when_nothing_is_saved() {
+    let env = env_with_app(None);
+    let checkout = env.workspace_dir("feat-login").join("backend");
+
+    env.octok(&["dev", "save"])
+        .current_dir(&checkout)
+        .assert()
+        .success()
+        .stdout("backend\n  no dev changes\n");
+    env.octok(&["dev", "save"])
+        .current_dir(env.dir.path())
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("octok dev save --branch <branch>"));
+    env.octok(&["dev", "save", "--file", "nope.env"])
+        .current_dir(&checkout)
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains(
+            "no checkout has the file `nope.env`",
+        ));
+}
+
+#[test]
+fn branch_is_refused_when_the_dev_changes_no_longer_apply_unless_allowed() {
+    let env = env_with_app(None);
+    let login = env.workspace_dir("feat-login").join("backend");
+    fs::write(
+        login.join("app.py"),
+        APP_PY.replace("port=8000", "port=9005"),
+    )
+    .unwrap();
+    env.octok(&["dev", "save", "--branch", "feat/login"])
+        .assert()
+        .success();
+    let upstream = APP_PY.replace("port=8000", "port=8080");
+    commit_file(&env.remote_dir("backend"), "app.py", &upstream);
+
+    env.octok(&["branch", "feat/other"])
+        .assert()
+        .code(1)
+        .stdout("")
+        .stderr(
+            predicate::str::contains("the dev changes of `backend` no longer apply to: app.py")
+                .and(predicate::str::contains("--allow-stale-dev")),
+        );
+    assert!(!env.workspace_dir("feat-other").exists());
+
+    env.octok(&["checkout", "-b", "feat/other", "--allow-stale-dev"])
+        .assert()
+        .success();
+    let other = env.workspace_dir("feat-other").join("backend");
+    assert_eq!(fs::read_to_string(other.join("app.py")).unwrap(), upstream);
+}
+
+#[test]
+fn the_saved_dev_changes_do_not_follow_a_repo_to_another_machine() {
+    let env = env_with_app(None);
+    let login = env.workspace_dir("feat-login").join("backend");
+    fs::write(
+        login.join("app.py"),
+        APP_PY.replace("port=8000", "port=9005"),
+    )
+    .unwrap();
+    env.octok(&["dev", "save", "--branch", "feat/login"])
+        .assert()
+        .success();
+    env.octok(&["rm", "feat/login"]).assert().success();
+    let saved = env.dir.path().join("dev/deeptree/backend");
+    assert!(saved.is_dir());
+
+    env.octok(&["repo", "set", "backend", "--location", "vm"])
+        .assert()
+        .success();
+
+    assert!(!saved.exists());
+    env.octok(&["dev", "show"])
+        .assert()
+        .success()
+        .stdout("backend\n  no dev changes\n");
 }

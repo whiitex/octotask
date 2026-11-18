@@ -90,6 +90,13 @@ pub enum Error {
     NoRunCommand(String),
     #[error("repo `{repo}` has no worktree in workspace `{workspace}`: add it with `octok branch`")]
     NoWorktree { repo: String, workspace: String },
+    #[error(
+        "the dev changes of `{repo}` no longer apply to: {}\nThe branch changed the same lines. `--allow-stale-dev` creates the workspace with those files as they are in git: make the dev changes again there, then run `octok dev save`.",
+        .files.join(", ")
+    )]
+    StaleDevChanges { repo: String, files: Vec<String> },
+    #[error("no checkout has the file `{0}`")]
+    DevFileNotFound(String),
     #[error("cannot locate home directory (set OCTOTASK_HOME)")]
     NoHome,
     #[error("`{0}` not found: install it or add it to PATH")]
