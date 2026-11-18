@@ -22,8 +22,8 @@ use prompts::{
     DEFAULT_BASE, RepoSettings, ask_location, ask_project_base, ask_repo_base, ask_repo_settings,
 };
 use utils::{
-    LOCAL, confirm, print_dev_changes, print_projects, print_pull_report, print_report,
-    print_repos, print_status, print_up_event, repo_label, up_labels,
+    LOCAL, confirm, print_dev_changes, print_dev_changes_json, print_projects, print_pull_report,
+    print_report, print_repos, print_status, print_up_event, repo_label, up_labels,
 };
 
 /// Exit code of a command ended by Ctrl-C, as shells report it.
@@ -170,6 +170,8 @@ enum DevCommand {
     Show {
         /// Keys or aliases of the repos (defaults to every repo of the project)
         repos: Vec<String>,
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -371,10 +373,14 @@ fn run(cli: Cli) -> Result<ExitCode> {
             let saved = save_dev_changes(registry.home(), &project, &workspace, &repos, &files)?;
             print_dev_changes(&project, &saved, false);
         }
-        Command::Dev(DevCommand::Show { repos }) => {
+        Command::Dev(DevCommand::Show { repos, json }) => {
             let project = registry.load_project(&resolve_project()?)?;
             let saved = dev_changes(registry.home(), &project, &as_strs(&repos))?;
-            print_dev_changes(&project, &saved, true);
+            if json {
+                print_dev_changes_json(&project, &saved);
+            } else {
+                print_dev_changes(&project, &saved, true);
+            }
         }
         Command::Up { repos, branch } => {
             return up(&registry, explicit_project, branch.as_deref(), &repos);

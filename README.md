@@ -336,7 +336,7 @@ Save them once, and every new workspace gets them, while git never sees them.
 | Command | What it does |
 |---|---|
 | `octok dev save [<repo>...] [--file <path>]... [--branch <branch>]` | Saves the dev changes of a workspace from its checkouts, replacing the ones saved before. Without `<repo>`, it saves every repository. Without `--branch`, it uses the workspace of the current folder. |
-| `octok dev show [<repo>...]` | Shows what is saved for each repository: the files, and the changes to the tracked ones. |
+| `octok dev show [<repo>...] [--json]` | Shows what is saved for each repository: the files, and the changes to the tracked ones. |
 | `octok branch <branch> --allow-stale-dev` | Creates a workspace even when some dev changes no longer apply. See below. |
 
 ```console

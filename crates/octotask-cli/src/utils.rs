@@ -174,6 +174,27 @@ pub(crate) fn print_dev_changes(project: &Project, repos: &[DevChanges], with_di
     }
 }
 
+/// Like the text of `print_dev_changes` with the diff: the files git does not track are
+/// only named here too.
+pub(crate) fn print_dev_changes_json(project: &Project, repos: &[DevChanges]) {
+    let repos: Vec<_> = repos
+        .iter()
+        .map(|changes| {
+            json!({
+                "key": changes.repo,
+                "alias": repo_alias(project, &changes.repo),
+                "changed": changes.changed,
+                "new": changes.new,
+                "diff": changes.diff,
+            })
+        })
+        .collect();
+    println!(
+        "{}",
+        json!({"schema": 1, "project": project.name, "repos": repos})
+    );
+}
+
 /// How a repo is shown: its key, followed by the alias when it has one.
 pub(crate) fn repo_label(key: &str, alias: Option<&str>) -> String {
     match alias {
@@ -365,11 +386,14 @@ fn print_orphan_caches(status: &Status) {
 }
 
 fn project_repo_label(project: &Project, key: &str) -> String {
-    let alias = project
+    repo_label(key, repo_alias(project, key))
+}
+
+fn repo_alias<'a>(project: &'a Project, key: &str) -> Option<&'a str> {
+    project
         .repos
         .get(key)
-        .and_then(|repo| repo.alias.as_deref());
-    repo_label(key, alias)
+        .and_then(|repo| repo.alias.as_deref())
 }
 
 /// The tool's own message: octok's summary of the failed command comes before it.

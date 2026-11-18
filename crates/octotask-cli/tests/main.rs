@@ -2493,3 +2493,31 @@ fn the_saved_dev_changes_do_not_follow_a_repo_to_another_machine() {
         .success()
         .stdout("backend\n  no dev changes\n");
 }
+
+#[test]
+fn dev_show_json_lists_the_saved_files_and_the_diff_of_each_repo() {
+    let env = env_with_app(None);
+    let login = env.workspace_dir("feat-login").join("backend");
+    fs::write(
+        login.join("app.py"),
+        APP_PY.replace("port=8000", "port=9005"),
+    )
+    .unwrap();
+    fs::write(login.join(".env"), "TOKEN=secret\n").unwrap();
+    env.octok(&["dev", "save", "--file", ".env", "--branch", "feat/login"])
+        .assert()
+        .success();
+
+    let shown = env.json(&["dev", "show", "--json"]);
+
+    assert_eq!(shown["schema"], 1);
+    assert_eq!(shown["project"], "deeptree");
+    let backend = &shown["repos"][0];
+    assert_eq!(backend["key"], "backend");
+    assert_eq!(backend["alias"], serde_json::Value::Null);
+    assert_eq!(backend["changed"], serde_json::json!(["app.py"]));
+    assert_eq!(backend["new"], serde_json::json!([".env"]));
+    let diff = backend["diff"].as_str().unwrap();
+    assert!(diff.contains("-run(port=8000)\n+run(port=9005)"), "{diff}");
+    assert!(!shown.to_string().contains("secret"), "{shown}");
+}
