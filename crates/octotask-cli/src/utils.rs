@@ -1,8 +1,13 @@
+use std::collections::HashMap;
 use std::io::{BufRead, Write};
-use std::process::ExitCode;
+use std::os::unix::process::ExitStatusExt;
+use std::process::{ExitCode, ExitStatus};
 
-use octotask_core::{Checkout, Commit, Project, PullOutcome, Result, Status, WorkspaceStatus};
+use octotask_core::{
+    Checkout, Commit, Project, PullOutcome, Result, Status, UpEvent, WorkspaceStatus,
+};
 use serde_json::json;
+use signal_hook::consts::SIGKILL;
 
 /// How a location on this machine is written.
 pub(crate) const LOCAL: &str = "local";
@@ -111,6 +116,41 @@ pub(crate) fn ask(
     match input.read_line(&mut answer) {
         Ok(read) if read > 0 => Some(answer.trim().to_string()),
         _ => None,
+    }
+}
+
+/// What `octok up` puts in front of the lines of each repo, by repo key: the alias or
+/// the key, padded to one width.
+pub(crate) fn up_labels<'a>(
+    project: &Project,
+    repos: impl Iterator<Item = &'a str>,
+) -> HashMap<String, String> {
+    let names: Vec<(&str, &str)> = repos
+        .map(|key| (key, project.repos[key].alias.as_deref().unwrap_or(key)))
+        .collect();
+    let width = max_width(names.iter().map(|(_key, name)| *name));
+    names
+        .into_iter()
+        .map(|(key, name)| (key.to_string(), format!("{name:<width$}")))
+        .collect()
+}
+
+/// The output of the repos goes to stdout, and what octok says about them to stderr.
+/// `stopping` says that the user has asked for a stop.
+pub(crate) fn print_up_event(labels: &HashMap<String, String>, event: UpEvent, stopping: bool) {
+    match event {
+        UpEvent::Output { repo, line } => println!("{} | {line}", labels[repo]),
+        UpEvent::Exited { repo, status } => {
+            eprintln!("{} | {}", labels[repo], how_it_ended(status, stopping));
+        }
+    }
+}
+
+fn how_it_ended(status: ExitStatus, stopping: bool) -> String {
+    match (stopping, status.signal()) {
+        (true, Some(SIGKILL)) => "killed: it was still running 10 seconds after the stop".into(),
+        (true, _) => "stopped".into(),
+        (false, _) => format!("ended ({status})"),
     }
 }
 

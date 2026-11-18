@@ -16,8 +16,9 @@ pub use config::{
 pub use error::{Error, Result};
 pub use home::Home;
 pub use workspaces::{
-    Checkout, NewRepo, NewWorkspace, PullOutcome, RepoChanges, RepoStatus, Status, WorkspaceStatus,
-    create_workspace, fetch_repos, locate_workspace, pull_workspace, register_repo, remove_project,
-    remove_workspace, set_project_location, status, unregister_repo, update_repo, workspace_name,
+    Checkout, NewRepo, NewWorkspace, PullOutcome, RepoChanges, RepoStatus, Running, Status,
+    Stopper, UpEvent, WorkspaceStatus, create_workspace, fetch_repos, locate_workspace,
+    pull_workspace, register_repo, remove_project, remove_workspace, set_project_location,
+    set_workspace_run, start_workspace, status, unregister_repo, update_repo, workspace_name,
     workspace_path,
 };

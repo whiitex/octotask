@@ -11,6 +11,7 @@ Working on it means creating the same branch in each of them, keeping them up to
 - **No repeated downloads.** Each repository is cloned once into a cache, and every workspace is created from it in an instant.
 - **Plain git underneath.** `octok` calls your own `git`, so your credentials, SSH config and hooks apply, and every checkout is a normal git working tree.
 - **Repos on other machines.** A repository can live on another machine, such as a VM, reached over `ssh`: `octok` runs the same commands there.
+- **One command to start everything.** `octok up` starts every repository of a workspace, shows their output together and stops them all at `Ctrl-C`.
 
 ```console
 $ octok project init shop
@@ -126,6 +127,7 @@ A repository can also have a shorter **alias**, accepted wherever the key is.
 | `octok repo set <repo> --base <branch>` | Changes the base branch. `--no-base` goes back to the base branch of the project. |
 | `octok repo set <repo> --url <url>` | Changes the URL and fetches the clone from it. |
 | `octok repo set <repo> --location <location>` | Moves the repository to another machine. `--no-location` goes back to the location of the project. |
+| `octok repo set <repo> --setup <command>` `--run <command>` | Set the commands that `octok up` runs to prepare and start the repository: see [Running](#running-octok-up). |
 | `octok repo rm <repo>` | Unregisters a repository and deletes its clone. Refused while a workspace uses it. |
 
 The options of `octok repo set` can be combined in one command.
@@ -284,6 +286,44 @@ They exit with code 1 if any repository failed.
 
 `octok pull` only fast-forwards: it never merges, rebases or resets.
 A checkout whose branch has diverged from the remote, is not on the remote yet or is on a detached HEAD is skipped and reported.
+
+### Running: `octok up`
+
+A repository can say how it is started, with two shell commands:
+
+- the **run command** starts it, such as `npm run dev`;
+- the **setup command** prepares a checkout before its first run, such as `npm ci`.
+
+| Command | What it does |
+|---|---|
+| `octok repo set <repo> --run <command>` | Sets the run command of a repository. `--no-run` removes it. |
+| `octok repo set <repo> --setup <command>` | Sets the setup command of a repository. `--no-setup` removes it. |
+| `octok repo set <repo> --run <command> --branch <branch>` | Sets the run command for the workspace of one branch only, for example to use another port there. `--no-run --branch <branch>` goes back to the command of the repository. |
+| `octok up [<repo>...] [--branch <branch>]` | Starts the repositories of a workspace and stays attached until they have all ended. Without `<repo>`, it starts every repository that has a run command. Without `--branch`, it uses the workspace of the current folder. |
+
+```console
+$ octok repo set frontend --setup 'npm ci' --run 'npm run dev -- --port 3000'
+$ octok repo set backend --run 'PORT=9005 uv run main.py'
+
+$ octok up --branch feat/login
+frontend | $ npm ci
+backend  | $ PORT=9005 uv run main.py
+backend  | Uvicorn running on http://0.0.0.0:9005
+frontend | added 312 packages in 9s
+frontend | $ npm run dev -- --port 3000
+frontend | Local: http://localhost:3000/
+^Cstopping...
+backend  | stopped
+frontend | stopped
+```
+
+- **Where a command runs.** In the checkout of its repository in that workspace, with `sh`, on the machine where the checkout lives. A repository without a run command is not started.
+- **Setup.** The setup command runs before the run command, until it succeeds once in that checkout, and again when its text changes. When it fails, the repository is not started.
+- **Output.** Every line a repository prints, on stdout or stderr, goes to the stdout of `octok` with the alias or the key of the repository in front. A line that starts with `$` is a command that `octok` runs. What `octok` itself says goes to stderr.
+- **A command that ends.** It does not stop the others. `octok up` ends when every repository has ended, with code 0 if they all ended well and 1 otherwise.
+- **Stopping.** `Ctrl-C` stops every repository, and `octok up` then exits with code 130. A command and every process it started receive `SIGTERM`, and `SIGKILL` if they are still running 10 seconds later.
+- **No process left behind.** The same stop happens by itself when `octok` is killed or its terminal is closed.
+- **Repositories on another machine.** Their commands run there, over `ssh`, and stop in the same way. They also stop when they have not heard from `octok` for 30 seconds, which is what a lost connection looks like from the other machine. On its side, `octok` gives up on a machine that has not answered for 15 seconds.
 
 ### Overview: `octok status`
 

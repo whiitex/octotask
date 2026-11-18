@@ -1,6 +1,7 @@
-use std::io::{self, ErrorKind};
+use std::io::{self, ErrorKind, PipeReader};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Output, Stdio};
+use std::process::{Child, Command, ExitStatus, Output, Stdio};
 
 use super::ssh;
 use crate::config::remote_path;
@@ -105,7 +106,7 @@ pub(super) fn run_query(program: &'static str, place: Place, args: &[&str]) -> R
 /// Runs `program <args>` with stderr left attached to octok's, so the user sees the
 /// tool's own progress. A failure carries no stderr: the tool has already printed it.
 pub(super) fn run_visible(program: &'static str, place: Place, args: &[&str]) -> Result<()> {
-    let status = command(program, place, args)
+    let status = command(program, place, args, &[])
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
         .status()
@@ -115,15 +116,36 @@ pub(super) fn run_visible(program: &'static str, place: Place, args: &[&str]) ->
 
 /// Runs `program <args>` attached to octok's terminal, for a tool that asks the user something.
 pub(super) fn run_attached(program: &'static str, place: Place, args: &[&str]) -> Result<()> {
-    let status = command(program, place, args)
+    let status = command(program, place, args, &[])
         .stdin(Stdio::inherit())
         .status()
         .map_err(|source| spawn_error(program, place, source))?;
     succeeded(program, place, args, status)
 }
 
+/// Starts `program <args>` in a process group of its own and leaves it running.
+/// Its stdin is a pipe, and its stdout and stderr come merged from one reader.
+/// On another machine, ssh gives up when the machine stops answering.
+pub(super) fn spawn_piped(
+    program: &'static str,
+    place: Place,
+    args: &[&str],
+) -> Result<(Child, PipeReader)> {
+    let failed_to_start = |source| spawn_error(program, place, source);
+    let (reader, writer) = io::pipe().map_err(failed_to_start)?;
+    let stderr = writer.try_clone().map_err(failed_to_start)?;
+    let child = command(program, place, args, &ssh::KEEP_ALIVE)
+        .stdin(Stdio::piped())
+        .stdout(writer)
+        .stderr(stderr)
+        .process_group(0)
+        .spawn()
+        .map_err(failed_to_start)?;
+    Ok((child, reader))
+}
+
 fn run_captured(program: &'static str, place: Place, args: &[&str]) -> Result<Output> {
-    command(program, place, args)
+    command(program, place, args, &[])
         .output()
         .map_err(|source| spawn_error(program, place, source))
 }
@@ -159,9 +181,10 @@ fn failed(program: &str, place: Place, args: &[&str], status: ExitStatus, stderr
     }
 }
 
-fn command(program: &str, place: Place, args: &[&str]) -> Command {
+/// `ssh_options` are for ssh, when the place is another machine.
+fn command(program: &str, place: Place, args: &[&str], ssh_options: &[&str]) -> Command {
     match place.host {
-        Some(host) => ssh::command(host, program, place.dir, args),
+        Some(host) => ssh::command(host, ssh_options, program, place.dir, args),
         None => local_command(program, place.dir, args),
     }
 }

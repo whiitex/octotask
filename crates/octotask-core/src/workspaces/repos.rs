@@ -1,5 +1,6 @@
 use super::cache::Cache;
-use super::workspace::workspaces_with_repo;
+use super::workspace::{workspace_name, workspaces_with_repo};
+use crate::config::validate_branch;
 use crate::{Error, Home, Location, OriginBranches, Project, Registry, Result};
 
 /// What `octok repo add` asks for. `key` defaults to the last path segment of the url,
@@ -73,6 +74,10 @@ pub struct RepoChanges<'a> {
     pub url: Option<&'a str>,
     /// `Some(None)` goes back to the project's location.
     pub location: Option<Option<&'a Location>>,
+    /// `Some(None)` removes the setup command.
+    pub setup: Option<Option<&'a str>>,
+    /// `Some(None)` removes the run command.
+    pub run: Option<Option<&'a str>>,
 }
 
 /// Changes the settings of the repo with this key or alias. Returns its key.
@@ -129,6 +134,23 @@ pub fn update_repo(
     Ok(key)
 }
 
+/// Sets the command that starts the repo with this key or alias in the workspace of
+/// `branch` only. `None` goes back to the command of the repo. Returns the key of the repo.
+pub fn set_workspace_run(
+    registry: &Registry,
+    project_name: &str,
+    name: &str,
+    branch: &str,
+    command: Option<&str>,
+) -> Result<String> {
+    validate_branch(branch)?;
+    registry.update_project(project_name, |project| {
+        let key = project.resolve_repo(name)?.to_string();
+        project.set_workspace_run(&workspace_name(branch), &key, command)?;
+        Ok(key)
+    })
+}
+
 /// Unregisters the repo with this key or alias and deletes its cache. Returns its key.
 /// Refused while a workspace still uses the repo, because the commits of its worktrees live in the cache.
 pub fn unregister_repo(registry: &Registry, project_name: &str, name: &str) -> Result<String> {
@@ -181,6 +203,12 @@ fn apply_changes(project: &mut Project, key: &str, changes: &RepoChanges) -> Res
     }
     if let Some(location) = changes.location {
         project.set_repo_location(key, location.cloned())?;
+    }
+    if let Some(setup) = changes.setup {
+        project.set_repo_setup(key, setup)?;
+    }
+    if let Some(run) = changes.run {
+        project.set_repo_run(key, run)?;
     }
     Ok(())
 }

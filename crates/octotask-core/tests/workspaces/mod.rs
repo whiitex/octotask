@@ -3,6 +3,7 @@
 
 mod project;
 mod repos;
+mod up;
 mod workspace;
 
 use std::path::{Path, PathBuf};

@@ -27,6 +27,11 @@ const SHARED_CONNECTION: [&str; 6] = [
 /// `Ssh::remember_passphrase` stores it. `IgnoreUnknown` is for an ssh that is not Apple's.
 const KEYCHAIN: [&str; 4] = ["-o", "IgnoreUnknown=UseKeychain", "-o", "UseKeychain=yes"];
 
+/// Makes ssh give up on a machine that has not answered for 15 seconds. Without it, a
+/// command that stays up would wait for ever on a connection that died without closing.
+pub(super) const KEEP_ALIVE: [&str; 4] =
+    ["-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=3"];
+
 /// Folder of the octok home under the home of the remote user.
 const DEFAULT_ROOT: &str = ".octotask";
 
@@ -134,12 +139,18 @@ pub fn resolve_location(input: &str) -> Result<Location> {
     Location::remote(host, root)
 }
 
-/// `ssh <host> <program> <args>`, with a `dir` passed to the program as `-C <dir>`.
+/// `ssh <options> <host> <program> <args>`, with a `dir` passed to the program as `-C <dir>`.
 /// A remote shell has no portable way to change directory first, and git, the only
 /// program run in a directory, takes `-C`.
-pub(super) fn command(host: &str, program: &str, dir: Option<&Path>, args: &[&str]) -> Command {
+pub(super) fn command(
+    host: &str,
+    options: &[&str],
+    program: &str,
+    dir: Option<&Path>,
+    args: &[&str],
+) -> Command {
     let mut command = Command::new(PROGRAM);
-    command.args(SHARED_CONNECTION);
+    command.args(SHARED_CONNECTION).args(options);
     if cfg!(target_os = "macos") {
         command.args(KEYCHAIN);
     }

@@ -272,10 +272,7 @@ pub fn pull_workspace(
     project: &Project,
     workspace: &str,
 ) -> Result<Vec<(String, Result<PullOutcome>)>> {
-    if !any_exists(&workspace_folders(home, project, workspace))? {
-        return Err(Error::WorkspaceNotFound(workspace.to_string()));
-    }
-    let report = members(home, project, workspace)
+    let report = members_of_existing(home, project, workspace)?
         .iter()
         .map(|member| (member.key.to_string(), pull_worktree(member)))
         .collect();
@@ -345,16 +342,16 @@ pub(crate) fn workspaces_with_repo(
 }
 
 /// One repo's place in a workspace: its cache and its worktree, on the repo's machine.
-struct Member<'a> {
-    key: &'a str,
-    repo: &'a Repo,
-    location: Location,
+pub(super) struct Member<'a> {
+    pub(super) key: &'a str,
+    pub(super) repo: &'a Repo,
+    pub(super) location: Location,
     cache: Cache,
-    worktree: PathBuf,
+    pub(super) worktree: PathBuf,
 }
 
 impl Member<'_> {
-    fn has_worktree(&self) -> Result<bool> {
+    pub(super) fn has_worktree(&self) -> Result<bool> {
         Files::new(&self.location).is_dir(&self.worktree)
     }
 
@@ -365,6 +362,18 @@ impl Member<'_> {
     fn shown_worktree(&self) -> PathBuf {
         self.location.shown(&self.worktree)
     }
+}
+
+/// The repos of a workspace, which must exist.
+pub(super) fn members_of_existing<'a>(
+    home: &Home,
+    project: &'a Project,
+    workspace: &str,
+) -> Result<Vec<Member<'a>>> {
+    if !any_exists(&workspace_folders(home, project, workspace))? {
+        return Err(Error::WorkspaceNotFound(workspace.to_string()));
+    }
+    Ok(members(home, project, workspace))
 }
 
 fn members<'a>(home: &Home, project: &'a Project, workspace: &str) -> Vec<Member<'a>> {

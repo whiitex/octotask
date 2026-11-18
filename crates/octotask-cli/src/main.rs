@@ -1,24 +1,32 @@
 mod prompts;
 mod utils;
 
-use std::io::{self, IsTerminal};
+use std::io::{self, IsTerminal, Write};
 use std::process::ExitCode;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
 
 use clap::{Args, Parser, Subcommand};
 use octotask_core::{
     Error, Home, Location, NewRepo, OriginBranches, Project, Registry, RepoChanges, Result, Ssh,
-    create_workspace, fetch_repos, locate_workspace, pull_workspace, register_repo, remove_project,
-    remove_workspace, resolve_location, set_project_location, status, unregister_repo, update_repo,
-    workspace_name, workspace_path,
+    Stopper, create_workspace, fetch_repos, locate_workspace, pull_workspace, register_repo,
+    remove_project, remove_workspace, resolve_location, set_project_location, set_workspace_run,
+    start_workspace, status, unregister_repo, update_repo, workspace_name, workspace_path,
 };
+use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
+use signal_hook::iterator::Signals;
 
 use prompts::{
     DEFAULT_BASE, RepoSettings, ask_location, ask_project_base, ask_repo_base, ask_repo_settings,
 };
 use utils::{
     LOCAL, confirm, print_projects, print_pull_report, print_report, print_repos, print_status,
-    repo_label,
+    print_up_event, repo_label, up_labels,
 };
+
+/// Exit code of a command ended by Ctrl-C, as shells report it.
+const INTERRUPTED: u8 = 130;
 
 /// octotask: multi-repo workspaces: one command for branches, PRs and services across repos.
 #[derive(Parser)]
@@ -73,6 +81,17 @@ enum Command {
     /// Fetch, then fast-forward each worktree of a workspace to its remote branch
     Pull {
         /// Branch of the workspace (defaults to the workspace of the current directory)
+        branch: Option<String>,
+    },
+    /// Start the repos of a workspace, each with its `run` command, until Ctrl-C
+    ///
+    /// Every line a repo prints is shown with the name of the repo in front. A repo
+    /// without a `run` command is not started.
+    Up {
+        /// Keys or aliases of the repos to start (defaults to every repo with a `run` command)
+        repos: Vec<String>,
+        /// Branch of the workspace (defaults to the workspace of the current directory)
+        #[arg(short, long)]
         branch: Option<String>,
     },
     /// Show the project, its repos and the checkouts of every workspace
@@ -143,7 +162,7 @@ enum RepoCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Change the alias, the base branch, the url or the location of a repo
+    /// Change the alias, the base branch, the url, the location or the commands of a repo
     Set {
         /// Key or alias of the repo
         repo: String,
@@ -192,6 +211,28 @@ struct RepoSetArgs {
     /// Go back to the project's location
     #[arg(long)]
     no_location: bool,
+    /// Shell command that `octok up` runs in a checkout before its first run, e.g. `npm ci`
+    #[arg(long, conflicts_with = "no_setup")]
+    setup: Option<String>,
+    /// Remove the setup command
+    #[arg(long)]
+    no_setup: bool,
+    /// Shell command that `octok up` runs in the checkout to start the repo
+    #[arg(long, group = "run_change")]
+    run: Option<String>,
+    /// Remove the run command
+    #[arg(long, group = "run_change")]
+    no_run: bool,
+    /// Change the run command in the workspace of this branch only
+    #[arg(
+        long,
+        requires = "run_change",
+        conflicts_with_all = [
+            "alias", "no_alias", "base", "no_base", "url", "location", "no_location", "setup",
+            "no_setup",
+        ]
+    )]
+    branch: Option<String>,
 }
 
 impl RepoSetArgs {
@@ -202,6 +243,8 @@ impl RepoSetArgs {
             base: optional_change(self.base.as_deref(), self.no_base),
             url: self.url.as_deref(),
             location: optional_change(location, self.no_location),
+            setup: optional_change(self.setup.as_deref(), self.no_setup),
+            run: optional_change(self.run.as_deref(), self.no_run),
         }
     }
 }
@@ -269,6 +312,9 @@ fn run(cli: Cli) -> Result<ExitCode> {
             println!("removed workspace `{name}` from {project_name}");
         }
         Command::Pull { branch } => return pull(&registry, explicit_project, branch.as_deref()),
+        Command::Up { repos, branch } => {
+            return up(&registry, explicit_project, branch.as_deref(), &repos);
+        }
         Command::Status { json } => {
             let project = registry.load_project(&resolve_project()?)?;
             print_status(&status(registry.home(), &project)?, json);
@@ -381,6 +427,13 @@ fn repo(registry: &Registry, project_name: &str, cmd: RepoCommand) -> Result<()>
         }
         RepoCommand::Ls { json } => print_repos(&registry.load_project(project_name)?, json),
         RepoCommand::Set { repo, changes } => {
+            if let Some(branch) = &changes.branch {
+                let run = changes.run.as_deref();
+                let key = set_workspace_run(registry, project_name, &repo, branch, run)?;
+                let workspace = workspace_name(branch);
+                println!("updated `{key}` in workspace `{workspace}` of {project_name}");
+                return Ok(());
+            }
             let location = resolve_optional_location(changes.location.as_deref())?;
             let key = update_repo(
                 registry,
@@ -484,16 +537,77 @@ fn pull(
     explicit_project: Option<&str>,
     branch: Option<&str>,
 ) -> Result<ExitCode> {
-    let (project_name, workspace) = match branch {
-        Some(branch) => (
-            registry.resolve_project(explicit_project)?,
-            workspace_name(branch),
-        ),
-        None => current_workspace(registry.home())?,
-    };
+    let (project_name, workspace) =
+        target_workspace(registry, explicit_project, branch, "octok pull <branch>")?;
     let project = registry.load_project(&project_name)?;
     let report = pull_workspace(registry.home(), &project, &workspace)?;
     Ok(print_pull_report(&project, report))
+}
+
+/// Stays attached until every command has ended. Ctrl-C stops them all.
+fn up(
+    registry: &Registry,
+    explicit_project: Option<&str>,
+    branch: Option<&str>,
+    repos: &[String],
+) -> Result<ExitCode> {
+    let usage = "octok up --branch <branch>";
+    let (project_name, workspace) = target_workspace(registry, explicit_project, branch, usage)?;
+    let project = registry.load_project(&project_name)?;
+    let repos: Vec<&str> = repos.iter().map(String::as_str).collect();
+    let running = start_workspace(registry.home(), &project, &workspace, &repos)?;
+    let interrupted = stop_on_signal(running.stopper());
+    let labels = up_labels(&project, running.started());
+    let all_succeeded = running.wait(|event| {
+        print_up_event(&labels, event, interrupted.load(Ordering::SeqCst));
+    });
+    Ok(if interrupted.load(Ordering::SeqCst) {
+        ExitCode::from(INTERRUPTED)
+    } else if all_succeeded {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
+}
+
+/// Asks for a stop at Ctrl-C, and when octok is told to end or loses its terminal.
+/// Returns the flag that says whether that happened.
+fn stop_on_signal(stopper: Stopper) -> Arc<AtomicBool> {
+    let interrupted = Arc::new(AtomicBool::new(false));
+    let mut signals =
+        Signals::new([SIGINT, SIGTERM, SIGHUP]).expect("signal handlers can be installed");
+    let flag = Arc::clone(&interrupted);
+    thread::spawn(move || {
+        for _signal in signals.forever() {
+            let first = !flag.swap(true, Ordering::SeqCst);
+            stopper.stop();
+            if first {
+                // The terminal may be the thing that just went away.
+                let _ = writeln!(io::stderr(), "stopping...");
+            }
+        }
+    });
+    interrupted
+}
+
+/// Project and workspace a command acts on: the ones of `branch`, else the ones that
+/// contain the current directory. `usage` shows how to pass the branch.
+fn target_workspace(
+    registry: &Registry,
+    explicit_project: Option<&str>,
+    branch: Option<&str>,
+    usage: &'static str,
+) -> Result<(String, String)> {
+    match branch {
+        Some(branch) => Ok((
+            registry.resolve_project(explicit_project)?,
+            workspace_name(branch),
+        )),
+        None => std::env::current_dir()
+            .ok()
+            .and_then(|dir| locate_workspace(registry.home(), &dir))
+            .ok_or(Error::NotInWorkspace(usage)),
+    }
 }
 
 /// `--location` connects to the machine once, to find the octok home there.
@@ -535,14 +649,6 @@ fn remember_passphrases(hosts: &[String]) -> Result<()> {
         }
     }
     Ok(())
-}
-
-/// The workspace that contains the current directory.
-fn current_workspace(home: &Home) -> Result<(String, String)> {
-    std::env::current_dir()
-        .ok()
-        .and_then(|dir| locate_workspace(home, &dir))
-        .ok_or(Error::NotInWorkspace)
 }
 
 /// Asks only at a terminal: scripts and agents get the error instead of a question nobody answers.

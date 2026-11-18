@@ -1,9 +1,12 @@
 use std::env;
 use std::ffi::OsString;
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, ChildStdout, Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use assert_cmd::prelude::*;
 use predicates::prelude::*;
@@ -1902,4 +1905,430 @@ fn project_init_without_a_terminal_uses_staging_and_this_machine() {
     let project = env.read("projects/deeptree.yaml");
     assert!(project.contains("base: staging"), "{project}");
     assert!(!project.contains("location"), "{project}");
+}
+
+/// Prints `ready` once it has started a `sleep` and written its pid to `sleep.pid`.
+const SLEEP_IN_BACKGROUND: &str = "sleep 300 & echo $! > sleep.pid; echo ready; wait";
+
+/// An `octok up` left running, with what it prints on stdout.
+struct Up {
+    octok: Child,
+    stdout: BufReader<ChildStdout>,
+}
+
+impl Up {
+    fn start(env: &Env) -> Self {
+        let mut octok = env
+            .octok(&["up", "--branch", "feat/login"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdout = BufReader::new(octok.stdout.take().unwrap());
+        Self { octok, stdout }
+    }
+
+    fn wait_for_line(&mut self, wanted: &str) {
+        let mut line = String::new();
+        while line.trim_end() != wanted {
+            line.clear();
+            let read = self.stdout.read_line(&mut line).unwrap();
+            assert_ne!(read, 0, "octok ended before printing {wanted:?}");
+        }
+    }
+
+    fn signal(&self, signal: &str) {
+        let pid = self.octok.id().to_string();
+        let sent = Command::new("kill").args([signal, &pid]).status().unwrap();
+        assert!(sent.success());
+    }
+
+    /// Waits for `octok` to end and returns its exit code and what it printed on stderr.
+    fn finish(self) -> (Option<i32>, String) {
+        let output = self.octok.wait_with_output().unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        (output.status.code(), stderr)
+    }
+}
+
+/// The workspace `feat-login` with one repo that sleeps once `octok up` has started it.
+struct Sleeping {
+    env: Env,
+    repo: &'static str,
+    /// Holds the pid of the `sleep` that the run command started.
+    pid_file: PathBuf,
+}
+
+impl Sleeping {
+    /// The repo `frontend`, on this machine.
+    fn here() -> Self {
+        let env = Env::with_repos(&["frontend"]);
+        let pid_file = env.workspace_dir("feat-login").join("frontend/sleep.pid");
+        Self::new(env, "frontend", pid_file)
+    }
+
+    /// The repo `backend`, on the other machine.
+    fn on_the_other_machine() -> Self {
+        let env = Env::with_repos(&[]);
+        env.octok(&["repo", "add", &env.remote("backend"), "--location", "vm"])
+            .assert()
+            .success();
+        let checkouts = env.machine_root().join("workspaces/deeptree/feat-login");
+        Self::new(env, "backend", checkouts.join("backend/sleep.pid"))
+    }
+
+    fn new(env: Env, repo: &'static str, pid_file: PathBuf) -> Self {
+        env.octok(&["repo", "set", repo, "--run", SLEEP_IN_BACKGROUND])
+            .assert()
+            .success();
+        env.octok(&["branch", "feat/login"]).assert().success();
+        Self {
+            env,
+            repo,
+            pid_file,
+        }
+    }
+
+    /// Starts `octok up` and waits for the repo to say `ready`.
+    fn up(&self) -> Up {
+        let mut up = Up::start(&self.env);
+        up.wait_for_line(&format!("{} | ready", self.repo));
+        up
+    }
+
+    fn is_running(&self) -> bool {
+        let pid = fs::read_to_string(&self.pid_file).unwrap();
+        Command::new("kill")
+            .args(["-0", pid.trim()])
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+    }
+
+    /// The `sleep` is gone, at the latest a moment from now.
+    fn assert_stopped(&self) {
+        self.assert_stopped_within(Duration::from_secs(5));
+    }
+
+    fn assert_stopped_within(&self, limit: Duration) {
+        let deadline = Instant::now() + limit;
+        while self.is_running() {
+            assert!(Instant::now() < deadline, "the sleep is still running");
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// `signal` sent to `octok up` stops the repo, and octok says so.
+    fn assert_stopped_by(&self, signal: &str) {
+        let up = self.up();
+        up.signal(signal);
+        let (code, stderr) = up.finish();
+
+        assert_eq!(code, Some(130), "{signal}: {stderr}");
+        let stopped = format!("stopping...\n{} | stopped\n", self.repo);
+        assert!(stderr.contains(&stopped), "{signal}: {stderr}");
+        self.assert_stopped();
+    }
+
+    /// The repo stops by itself when `octok up` is killed, with no chance to stop it.
+    fn assert_stopped_when_octok_is_killed(&self) {
+        let up = self.up();
+        up.signal("-KILL");
+        up.finish();
+
+        self.assert_stopped();
+    }
+}
+
+#[test]
+fn repo_set_changes_the_setup_and_run_commands() {
+    let env = Env::with_repos(&["frontend"]);
+
+    env.octok(&[
+        "repo",
+        "set",
+        "frontend",
+        "--setup",
+        "npm ci",
+        "--run",
+        "npm run dev -- --port 3000",
+    ])
+    .assert()
+    .success();
+    let yaml = env.read("projects/deeptree.yaml");
+    assert!(yaml.contains("    setup: npm ci\n"), "{yaml}");
+    assert!(
+        yaml.contains("    run: npm run dev -- --port 3000\n"),
+        "{yaml}"
+    );
+
+    env.octok(&["repo", "set", "frontend", "--no-setup", "--no-run"])
+        .assert()
+        .success();
+    let yaml = env.read("projects/deeptree.yaml");
+    assert!(!yaml.contains("setup"), "{yaml}");
+    assert!(!yaml.contains("run"), "{yaml}");
+
+    env.octok(&["repo", "set", "frontend", "--run", "x", "--no-run"])
+        .assert()
+        .code(2);
+}
+
+#[test]
+fn repo_set_with_a_branch_changes_the_run_command_of_that_workspace_only() {
+    let env = Env::with_repos(&["frontend"]);
+    env.octok(&[
+        "repo",
+        "set",
+        "frontend",
+        "--alias",
+        "web",
+        "--run",
+        "echo 3000",
+    ])
+    .assert()
+    .success();
+    env.octok(&["branch", "feat/login"]).assert().success();
+    env.octok(&["branch", "feat/other"]).assert().success();
+    let up = |branch: &str| env.stdout(&["up", "--branch", branch]);
+
+    env.octok(&[
+        "repo",
+        "set",
+        "web",
+        "--run",
+        "echo 3001",
+        "--branch",
+        "feat/login",
+    ])
+    .assert()
+    .success()
+    .stdout("updated `frontend` in workspace `feat-login` of deeptree\n");
+    let yaml = env.read("projects/deeptree.yaml");
+    assert!(
+        yaml.contains(
+            "workspaces:\n  feat-login:\n    repos:\n      frontend:\n        run: echo 3001\n"
+        ),
+        "{yaml}"
+    );
+    assert!(up("feat/login").contains("web | 3001\n"));
+    assert!(up("feat/other").contains("web | 3000\n"));
+
+    env.octok(&["repo", "set", "web", "--no-run", "--branch", "feat/login"])
+        .assert()
+        .success();
+    assert!(up("feat/login").contains("web | 3000\n"));
+    assert!(!env.read("projects/deeptree.yaml").contains("workspaces"));
+
+    env.octok(&["repo", "set", "web", "--branch", "feat/login"])
+        .assert()
+        .code(2);
+    env.octok(&[
+        "repo",
+        "set",
+        "web",
+        "--run",
+        "x",
+        "--alias",
+        "w",
+        "--branch",
+        "feat/login",
+    ])
+    .assert()
+    .code(2);
+}
+
+#[test]
+fn up_prefixes_every_line_with_its_repo_and_ends_with_the_commands() {
+    let env = Env::with_repos(&["frontend", "backend", "docs"]);
+    env.octok(&[
+        "repo",
+        "set",
+        "frontend",
+        "--alias",
+        "web",
+        "--run",
+        "echo hello",
+    ])
+    .assert()
+    .success();
+    env.octok(&["repo", "set", "backend", "--run", "echo hi; echo oops >&2"])
+        .assert()
+        .success();
+    env.octok(&["branch", "feat/login"]).assert().success();
+
+    env.octok(&["up", "--branch", "feat/login"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("web     | $ echo hello\n")
+                .and(predicate::str::contains("web     | hello\n"))
+                .and(predicate::str::contains("backend | hi\n"))
+                .and(predicate::str::contains("backend | oops\n"))
+                .and(predicate::str::contains("docs").not()),
+        )
+        .stderr("web     | ended (exit status: 0)\nbackend | ended (exit status: 0)\n");
+}
+
+#[test]
+fn up_starts_only_the_repos_it_is_given_after_their_setup() {
+    let env = Env::with_repos(&["frontend", "backend"]);
+    env.octok(&[
+        "repo",
+        "set",
+        "frontend",
+        "--alias",
+        "web",
+        "--setup",
+        "echo installing",
+        "--run",
+        "echo hello",
+    ])
+    .assert()
+    .success();
+    env.octok(&["repo", "set", "backend", "--run", "echo hi"])
+        .assert()
+        .success();
+    env.octok(&["branch", "feat/login"]).assert().success();
+
+    let first = env.stdout(&["up", "web", "--branch", "feat/login"]);
+    assert_eq!(
+        first,
+        "web | $ echo installing\nweb | installing\nweb | $ echo hello\nweb | hello\n"
+    );
+    let second = env.stdout(&["up", "web", "--branch", "feat/login"]);
+    assert_eq!(second, "web | $ echo hello\nweb | hello\n");
+
+    env.octok(&["up", "nope", "--branch", "feat/login"])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("nope"));
+}
+
+#[test]
+fn up_uses_the_workspace_of_the_current_directory_and_fails_with_a_command() {
+    let env = Env::with_repos(&["frontend"]);
+    env.octok(&["repo", "set", "frontend", "--run", "exit 3"])
+        .assert()
+        .success();
+    env.octok(&["branch", "feat/login"]).assert().success();
+
+    env.octok(&["up"])
+        .current_dir(env.workspace_dir("feat-login").join("frontend"))
+        .assert()
+        .code(1)
+        .stderr("frontend | ended (exit status: 3)\n");
+    env.octok(&["up"])
+        .current_dir(env.dir.path())
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("octok up --branch <branch>"));
+}
+
+#[test]
+fn up_without_a_run_command_says_how_to_set_one() {
+    let env = Env::with_repos(&["frontend"]);
+    env.octok(&["branch", "feat/login"]).assert().success();
+
+    env.octok(&["up", "--branch", "feat/login"])
+        .assert()
+        .code(1)
+        .stdout("")
+        .stderr(predicate::str::contains("octok repo set <repo> --run"));
+}
+
+#[test]
+fn up_stops_every_command_on_ctrl_c_and_when_it_is_told_to_end() {
+    let sleeping = Sleeping::here();
+
+    for signal in ["-INT", "-TERM", "-HUP"] {
+        sleeping.assert_stopped_by(signal);
+    }
+}
+
+#[test]
+fn up_stops_every_command_on_ctrl_c_at_a_terminal() {
+    let sleeping = Sleeping::here();
+
+    let mut terminal = sleeping.env.terminal(&["up", "--branch", "feat/login"]);
+    terminal.exp_string("frontend | ready").unwrap();
+    terminal.send_control('c').unwrap();
+    let printed = terminal.exp_eof().unwrap();
+    let status = terminal.process().wait().unwrap();
+
+    assert!(matches!(status, WaitStatus::Exited(_, 130)), "{status:?}");
+    assert!(printed.contains("frontend | stopped"), "{printed}");
+    sleeping.assert_stopped();
+}
+
+#[test]
+fn the_commands_stop_when_octok_is_killed() {
+    Sleeping::here().assert_stopped_when_octok_is_killed();
+}
+
+#[test]
+fn up_runs_the_commands_of_a_repo_on_the_other_machine_in_its_checkout() {
+    let env = Env::with_repos(&[]);
+    env.octok(&["repo", "add", &env.remote("backend"), "--location", "vm"])
+        .assert()
+        .success();
+    env.octok(&[
+        "repo",
+        "set",
+        "backend",
+        "--setup",
+        r#"echo "it's set up""#,
+        "--run",
+        "pwd -P; echo done",
+    ])
+    .assert()
+    .success();
+    env.octok(&["branch", "feat/login"]).assert().success();
+    let checkout = env
+        .machine_root()
+        .join("workspaces/deeptree/feat-login/backend");
+
+    let printed = env.stdout(&["up", "--branch", "feat/login"]);
+
+    assert_eq!(
+        printed,
+        format!(
+            "backend | $ echo \"it's set up\"\nbackend | it's set up\nbackend | $ pwd -P; echo done\nbackend | {}\nbackend | done\n",
+            checkout.display()
+        )
+    );
+    let again = env.stdout(&["up", "--branch", "feat/login"]);
+    assert!(!again.contains("set up"), "the setup runs once: {again}");
+    let ssh_log = fs::read_to_string(env.machine_file("ssh.log")).unwrap();
+    assert!(ssh_log.contains("ServerAliveInterval=5"), "{ssh_log}");
+}
+
+#[test]
+fn up_stops_the_commands_on_the_other_machine_on_ctrl_c() {
+    Sleeping::on_the_other_machine().assert_stopped_by("-INT");
+}
+
+#[test]
+fn the_commands_on_the_other_machine_stop_when_octok_is_killed() {
+    Sleeping::on_the_other_machine().assert_stopped_when_octok_is_killed();
+}
+
+#[test]
+fn the_commands_on_the_other_machine_stop_when_octok_goes_silent() {
+    let sleeping = Sleeping::on_the_other_machine();
+
+    let up = sleeping.up();
+    // Frozen, octok keeps the connection open and says nothing: what a network that died
+    // without closing the connection looks like from the other machine.
+    up.signal("-STOP");
+    thread::sleep(Duration::from_secs(10));
+    assert!(
+        sleeping.is_running(),
+        "stopped before 30 seconds of silence"
+    );
+
+    sleeping.assert_stopped_within(Duration::from_secs(40));
+    up.signal("-KILL");
+    up.finish();
 }
