@@ -90,6 +90,7 @@ save)
         [ -f "$file" ] || printf 'missing %s\n' "$file"
     done
     printf '%s\n' "$filter_script" >"$next/filter.sh" || exit
+    changed_before=$(stored dev/changed)
     rm -rf "$store"
     if [ -n "$(find "$next/dev" -type f | head -n 1)" ]; then
         mv "$next" "$store" || exit
@@ -99,7 +100,12 @@ save)
     install
     # git takes a file whose size is not the one in its index as changed, without asking
     # the filter: staging the files, which the filter leaves as git has them, fixes the size.
-    stored dev/changed | while IFS= read -r path; do
+    # A file that lost its dev changes is as git has it, with the size it had with them.
+    {
+        printf '%s\n' "$changed_before"
+        stored dev/changed
+    } | LC_ALL=C sort -u | while IFS= read -r path; do
+        [ -f "$path" ] && git cat-file -e "HEAD:$path" 2>/dev/null || continue
         git add -- "$path" || exit
     done
     ;;

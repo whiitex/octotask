@@ -241,6 +241,18 @@ fn saving_again_follows_the_checkout() {
 }
 
 #[test]
+fn a_file_that_lost_its_dev_changes_is_unchanged_for_git() {
+    let fx = backend_with_dev_changes();
+    let login = checkout(&fx, "feat-login");
+
+    replace(&login.join("my config.yaml"), "db: DeepTree", "db: Agent");
+    let saved = save(&fx, &[]);
+
+    assert_eq!(saved.changed, ["main.py"]);
+    assert_eq!(status(&login), "");
+}
+
+#[test]
 fn dev_changes_lists_what_is_saved_for_each_repo() {
     let fx = backend_with_dev_changes();
     fx.register(&fx.remote("frontend"));
