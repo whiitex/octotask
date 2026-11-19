@@ -58,7 +58,7 @@ pub struct Checkout {
     /// `None` when the worktree cannot be read.
     pub commit: Option<Commit>,
     /// Why the worktree cannot be read, e.g. its cache is gone.
-    pub error: Option<String>,
+    pub error: Option<Error>,
 }
 
 /// What `create_workspace` did for each repo.
@@ -1184,7 +1184,7 @@ fn checkout(member: &Member) -> Option<Checkout> {
     let (branch, on_remote, commit, error) = match read {
         Ok(None) => return None,
         Ok(Some((branch, on_remote, commit))) => (branch, on_remote, Some(commit), None),
-        Err(error) => (None, false, None, Some(error.to_string())),
+        Err(error) => (None, false, None, Some(error)),
     };
     Some(Checkout {
         repo: member.key.to_string(),

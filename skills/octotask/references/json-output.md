@@ -21,9 +21,11 @@ This page lists what each command then prints, how a failure looks, and what the
 - **Failures are documents too.**
   A command that fails prints a document with an `error` on stdout and exits with a code other than 0.
 - **No secrets.**
-  The `run` and `setup` commands of a repository are never printed.
   The files that git does not track are only named.
-- **`--help` and `--version`** print text, with or without `--json`.
+  The documents about a repository leave out its `run` and `setup` commands.
+  `octok up` is the one command that shows them, in the lines it prints before running each one.
+- **`--help`, `--version` and `octok help`** print text.
+  `octok help` does not take `--json`.
 
 ## Names used in every document
 
@@ -34,7 +36,7 @@ This page lists what each command then prints, how a failure looks, and what the
 | `repos` | A list with one entry per repository, in the order of the project. |
 | `key` | The key of a repository, in an entry of `repos`. |
 | `path` | A folder. On another machine it is written `<host>:<path>`, for example `api-dev-1:/home/ubuntu/.octotask/workspaces/shop/feat-login/backend`. |
-| `location` | Where a repository lives: `local`, or `<host>:<octok home>` on another machine. |
+| `location` | Where a repository lives: `local`, or `<host>:<path>` on another machine, with the folder that `octok` uses there. |
 
 ## Exit codes
 
@@ -48,11 +50,14 @@ They are the same with and without `--json`.
 | 3 | Something the command names is not there: a project, a repository, a branch, a workspace, a run command. | Check the name with `octok status --json`. |
 | 4 | Refused, because it would lose work that exists nowhere else. | Commit and push, or ask the user. Never add `--force` on your own. |
 | 5 | Refused, because it conflicts with what exists: already there, in use, or no longer applies. | Read `error.code`. |
-| 6 | Some repositories failed and the others went well. The document is the normal one, with an `error` in the entry of each failed repository. | Read `repos`. |
-| 7 | Another machine or a program cannot be reached: `ssh` failed, or `git`, `gh` or `ssh` is not installed. | Ask the user. |
+| 6 | The command went through the repositories one by one, and at least one failed. The document is the normal one, with an `error` in the entry of each failed repository. | Read `repos`. |
+| 7 | Another machine or a program cannot be reached: `ssh` failed, or a program that `octok` runs, such as `git`, `gh`, `ssh` or `sh`, is not installed. | Ask the user. |
 | 130 | `octok up` was stopped with Ctrl-C or a signal. | |
 
-`octok up` exits with 1 when a repository ended with a failure.
+- A command that exits with 6 has no `error` at the top of its document, even when every repository failed.
+  The exit code is 6 whatever the errors of the repositories are.
+- `octok up` exits with 1 when a repository ended with a failure, and with 130 when it was stopped.
+  In both cases the last documents are the `exited` events, not an `error`.
 
 ## Failures
 
@@ -66,6 +71,8 @@ They are the same with and without `--json`.
   It can change at any release.
 - The other fields are what the error is about.
   They are listed below.
+  `reasons` and `reviewed` hold text for people, one line per repository.
+  `exit_code` is `null` for a command that a signal ended.
 
 | `code` | Exit | Other fields |
 |---|---|---|
@@ -132,7 +139,8 @@ They are the same with and without `--json`.
   A repository without a checkout in the workspace has no entry.
 - `checkouts[].branch` is `null` on a detached HEAD.
 - `checkouts[].on_remote` says whether the remote had the branch at the last fetch.
-- `checkouts[].commit` is `null`, and `error` says why, when the checkout cannot be read.
+- `checkouts[].commit` is `null` when the checkout cannot be read.
+  `checkouts[].error` then says why, as the `error` described under [Failures](#failures). It is `null` otherwise.
 - `orphan_caches` lists the clones of repositories that are no longer in the project.
 
 ### `octok branch`, `octok checkout`, `octok pr review`
@@ -194,7 +202,9 @@ They are the same with and without `--json`.
 ```
 
 `file` is the file that holds the settings of the project.
-`octok project set --location` and `--no-location` add `repos`: the repositories cloned again where the project now lives, as in [`octok fetch`](#octok-fetch-octok-pull).
+`octok project init` also makes the project the default one.
+`octok project set --base <branch>` warns on stderr when the remote of a repository lacks that branch.
+`octok project set --location <location>` and `octok project set --no-location` add `repos`: the repositories cloned again where the project now lives, as in [`octok fetch`](#octok-fetch-octok-pull).
 The command then exits with 6 when one of them failed.
 
 ### `octok project use`
@@ -220,6 +230,7 @@ The command then exits with 6 when one of them failed.
 - `alias` is `null` for a repository without one.
 - `base` is the base branch in effect: the one of the repository, else the one of the project.
 - `octok repo set --branch <branch>` adds `workspace`, the workspace whose run command changed.
+- The run and setup commands are not in the document, so it does not show a change to them.
 
 ### `octok repo ls`
 
@@ -260,3 +271,4 @@ A command that a signal ended has the code a shell gives it, 128 plus the number
 That happens to commands that are still running 10 seconds after a stop, with `signal` 9.
 
 A command that fails before anything starts prints one failure document instead.
+A setup command that fails ends its repository: the `exited` event has its code, and the run command does not start.

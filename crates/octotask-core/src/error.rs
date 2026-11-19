@@ -5,6 +5,7 @@ use serde::ser::{Serialize, SerializeMap, Serializer};
 use serde_json::{Value, json};
 
 use crate::utils::CONFIG_VERSION;
+use crate::workspaces::workspace_name;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -324,9 +325,11 @@ impl Error {
             Self::WorkspaceExists { name, path } => {
                 ("workspace_exists", json!({"workspace": name, "path": path}))
             }
-            Self::WorkspaceNotFound(workspace) => {
-                ("workspace_not_found", json!({"workspace": workspace}))
-            }
+            // Some callers have the branch and some the name: the name is what a program gets.
+            Self::WorkspaceNotFound(branch) => (
+                "workspace_not_found",
+                json!({"workspace": workspace_name(branch)}),
+            ),
             Self::NotInWorkspace(usage) => ("not_in_workspace", json!({"usage": usage})),
             Self::NothingToRun(workspace) => ("nothing_to_run", json!({"workspace": workspace})),
             Self::NoRunCommand(repo) => ("no_run_command", json!({"repo": repo})),

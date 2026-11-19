@@ -553,7 +553,13 @@ fn print_checkouts(status: &Status, workspace: &WorkspaceStatus) {
                 ),
                 None => format!(
                     "cannot be read: {}",
-                    last_line(checkout.error.as_deref().unwrap_or_default())
+                    last_line(
+                        &checkout
+                            .error
+                            .as_ref()
+                            .map(ToString::to_string)
+                            .unwrap_or_default()
+                    )
                 ),
             },
         };

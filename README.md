@@ -466,7 +466,9 @@ $ octok rm feat/login --json
 - **No questions.** With `--json`, `octok` never asks anything, even at a terminal, and `ssh` never asks either.
   `octok set-ssh-passphrase` is refused: it only works by asking.
 - **stderr.** It still carries the progress of git and the warnings, for people.
-- **Secrets.** The run and setup commands are never printed, and the files that git does not track are only named.
+- **Secrets.** The files that git does not track are only named, and the documents about a repository leave out its run and setup commands. Only `octok up` shows them, as it does in text.
+
+When the reader of its output goes away, as in `octok status | head -1`, `octok` ends quietly, like other commands.
 
 The exit code says which kind of failure happened, with and without `--json`:
 
@@ -478,7 +480,7 @@ The exit code says which kind of failure happened, with and without `--json`:
 | 3 | Something the command names is not there: a project, a repository, a branch, a workspace. |
 | 4 | Refused, because it would lose work that exists nowhere else. |
 | 5 | Refused, because it conflicts with what exists: already there, in use, or no longer applies. |
-| 6 | Some repositories failed and the others went well. |
+| 6 | The command went through the repositories one by one, and at least one failed. |
 | 7 | Another machine or a program cannot be reached. |
 | 130 | `octok up` was stopped. |
 

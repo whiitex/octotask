@@ -3386,7 +3386,11 @@ fn rm_json_says_what_was_removed_or_why_it_was_refused() {
     let (code, missing) = env.document(&["rm", "feat/login", "--json"]);
     assert_eq!(code, Some(3));
     assert_eq!(missing["error"]["code"], "workspace_not_found");
-    assert_eq!(missing["error"]["workspace"], "feat/login");
+    // The name of the workspace, as `octok pull` gives it, not the branch as typed.
+    assert_eq!(missing["error"]["workspace"], "feat-login");
+    let (code, missing) = env.document(&["pull", "feat/login", "--json"]);
+    assert_eq!(code, Some(3));
+    assert_eq!(missing["error"]["workspace"], "feat-login");
 }
 
 #[test]
@@ -3448,6 +3452,7 @@ fn a_command_octok_cannot_read_is_a_json_failure_too() {
         vec!["--json", "nope"],
         vec!["repo", "set", "frontend", "--json"],
         vec!["status", "--json", "--nope"],
+        vec!["status", "--json=true"],
     ] {
         let out = env.octok(&args).output().unwrap();
         let failure: serde_json::Value =
@@ -3651,4 +3656,44 @@ fn up_json_fails_with_a_document_when_nothing_can_start() {
     assert_eq!(code, Some(3));
     assert_eq!(failure["error"]["code"], "nothing_to_run");
     assert_eq!(failure["error"]["workspace"], "feat-login");
+}
+
+#[test]
+fn status_json_says_why_a_checkout_cannot_be_read_as_an_error_document() {
+    let env = Env::with_repos(&["frontend", "backend"]);
+    env.octok(&["branch", "feat/login"]).assert().success();
+    fs::remove_dir_all(env.dir.path().join("cache/deeptree/backend.git/worktrees")).unwrap();
+
+    let (code, status) = env.document(&["status", "--json"]);
+
+    assert_eq!(code, Some(0));
+    let checkouts = &status["workspaces"][0]["checkouts"];
+    assert_eq!(checkouts[0]["error"], serde_json::Value::Null);
+    assert_eq!(checkouts[1]["commit"], serde_json::Value::Null);
+    assert_eq!(checkouts[1]["error"]["code"], "command_failed");
+    let message = checkouts[1]["error"]["message"].as_str().unwrap();
+    assert!(message.contains("fatal: "), "{message}");
+}
+
+#[test]
+fn a_reader_that_goes_away_ends_octok_quietly() {
+    let env = Env::with_repos(&["frontend"]);
+    let run = "echo ready; sleep 1; echo more; echo more; sleep 300";
+    env.octok(&["repo", "set", "frontend", "--run", run])
+        .assert()
+        .success();
+    env.octok(&["branch", "feat/login"]).assert().success();
+    let mut up = Up::start_with(&env, &["up", "--branch", "feat/login", "--json"]);
+    up.wait_for_line(r#"{"schema":1,"event":"output","repo":"frontend","line":"ready"}"#);
+
+    drop(up.stdout);
+    let output = up.octok.wait_with_output().unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("panicked"), "{stderr}");
+    assert_eq!(
+        std::os::unix::process::ExitStatusExt::signal(&output.status),
+        Some(13),
+        "ended by SIGPIPE, as any command whose reader went away: {stderr}"
+    );
 }

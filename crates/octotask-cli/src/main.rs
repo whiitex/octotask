@@ -370,6 +370,7 @@ fn optional_change<T>(value: Option<T>, clear: bool) -> Option<Option<T>> {
 }
 
 fn main() -> ExitCode {
+    end_quietly_when_the_reader_goes_away();
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(refusal) => return refuse_command_line(&refusal),
@@ -381,13 +382,23 @@ fn main() -> ExitCode {
     run(cli, out).unwrap_or_else(|error| out.failure(&error))
 }
 
+/// Rust ignores SIGPIPE, so printing to a pipe that was closed panics. With the default
+/// action octok ends as any command does in `octok status | head -1`.
+fn end_quietly_when_the_reader_goes_away() {
+    // SAFETY: the first thing `main` does, before any thread exists, and restoring the
+    // default action of a signal has no other effect on the process.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+}
+
 /// clap refuses a command line before `--json` is read, so the arguments are searched
 /// for it. Help and the version are not failures: they stay text.
 fn refuse_command_line(refusal: &clap::Error) -> ExitCode {
     let wants_json = std::env::args()
         .skip(1)
         .take_while(|argument| argument != "--")
-        .any(|argument| argument == "--json");
+        .any(|argument| argument == "--json" || argument.starts_with("--json="));
     if wants_json && refusal.use_stderr() {
         print_usage_failure(&refusal.render().to_string())
     } else {

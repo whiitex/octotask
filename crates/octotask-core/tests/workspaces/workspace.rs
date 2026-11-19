@@ -860,7 +860,7 @@ fn status_reports_repos_and_the_checkouts_of_every_workspace() {
     let commit = checkout.commit.as_ref().unwrap();
     assert_eq!(commit.subject, "add login endpoint");
     assert!(!commit.date.is_empty() && !commit.age.is_empty());
-    assert_eq!(checkout.error, None);
+    assert!(checkout.error.is_none());
 }
 
 #[test]
