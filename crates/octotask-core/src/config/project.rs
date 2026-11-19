@@ -510,7 +510,15 @@ pub(crate) fn validate_branch(value: &str) -> Result<()> {
     {
         return fail("contains a character git does not allow");
     }
-    if value.contains("..") || value.ends_with('/') || value.ends_with(".lock") {
+    let broken_part =
+        |part: &str| part.is_empty() || part.starts_with('.') || part.ends_with(".lock");
+    if value.split('/').any(broken_part)
+        || value.contains("..")
+        || value.contains("@{")
+        || value.ends_with('.')
+        || value == "@"
+        || value == "HEAD"
+    {
         return fail("is not a valid git branch name");
     }
     Ok(())

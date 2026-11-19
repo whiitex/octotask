@@ -1,8 +1,8 @@
 use std::fs;
 
 use octotask_core::{
-    Error, Location, NewRepo, PullOutcome, create_workspace, locate_workspace, pull_workspace,
-    register_repo, remove_workspace, status, workspace_path,
+    Error, Location, NewRepo, PullOutcome, checkout_workspace, create_workspace, locate_workspace,
+    pull_workspace, register_repo, remove_workspace, status, workspace_path,
 };
 
 use super::{
@@ -211,6 +211,200 @@ fn create_workspace_undoes_the_worktrees_already_added_when_a_later_repo_fails()
     assert!(matches!(err, Error::CommandFailed { .. }), "{err:?}");
     assert!(!fx.workspace_dir("feat-login").exists());
     assert_eq!(git(&fx.cache_dir("frontend"), &["branch", "--list"]), "");
+}
+
+#[test]
+fn checkout_workspace_takes_the_remote_branch_where_it_exists_and_the_base_elsewhere() {
+    let fx = fixture_with_repos(&["frontend", "backend"]);
+    // Pushed after the clone: only a fetch at checkout time can see it.
+    commit_on(&fx.remote_dir("backend"), "feat/login", "a teammate's work");
+
+    let workspace = checkout_workspace(&fx.registry(), PROJECT, "feat/login", None, false).unwrap();
+
+    assert_eq!(workspace.path, fx.workspace_dir("feat-login"));
+    assert_eq!(workspace.tracked, ["backend"]);
+    assert_eq!(workspace.created, ["frontend"]);
+    assert!(workspace.kept.is_empty() && workspace.restored.is_empty());
+    let backend = workspace.path.join("backend");
+    assert_eq!(git(&backend, &["branch", "--show-current"]), "feat/login");
+    assert_eq!(
+        head(&backend, "HEAD"),
+        head(&fx.remote_dir("backend"), "feat/login")
+    );
+    assert_eq!(
+        git(&backend, &["rev-parse", "--abbrev-ref", "@{upstream}"]),
+        "origin/feat/login"
+    );
+    let frontend = workspace.path.join("frontend");
+    assert_eq!(git(&frontend, &["branch", "--show-current"]), "feat/login");
+    assert_eq!(
+        head(&frontend, "HEAD"),
+        head(&fx.remote_dir("frontend"), "main")
+    );
+}
+
+#[test]
+fn checkout_workspace_refuses_a_branch_that_is_on_no_remote_and_creates_nothing() {
+    let fx = fixture_with_repos(&["frontend", "backend"]);
+
+    let err = checkout_workspace(&fx.registry(), PROJECT, "feat/login", None, false).unwrap_err();
+
+    assert!(
+        matches!(&err, Error::BranchNotFound(branch) if branch == "feat/login"),
+        "{err:?}"
+    );
+    assert!(!fx.workspace_dir("feat-login").exists());
+    for repo in ["frontend", "backend"] {
+        assert_eq!(git(&fx.cache_dir(repo), &["branch", "--list"]), "");
+    }
+}
+
+#[test]
+fn checkout_workspace_returns_a_complete_workspace_without_the_network() {
+    let fx = fixture_with_repos(&["frontend", "backend"]);
+    commit_on(&fx.remote_dir("backend"), "feat/login", "a teammate's work");
+    let path = checkout_workspace(&fx.registry(), PROJECT, "feat/login", None, false)
+        .unwrap()
+        .path;
+    for repo in ["frontend", "backend"] {
+        fs::remove_dir_all(fx.remote_dir(repo)).unwrap();
+    }
+
+    let workspace = checkout_workspace(&fx.registry(), PROJECT, "feat/login", None, false).unwrap();
+
+    assert_eq!(workspace.path, path);
+    assert_eq!(workspace.kept, ["frontend", "backend"]);
+    assert!(workspace.tracked.is_empty() && workspace.created.is_empty());
+}
+
+#[test]
+fn checkout_workspace_adds_the_worktrees_missing_from_an_existing_workspace() {
+    let fx = fixture_with_repos(&["frontend"]);
+    let path = create_workspace(&fx.registry(), PROJECT, "feat/login", None, false)
+        .unwrap()
+        .path;
+    let backend = fx.remote("backend");
+    commit_on(&fx.remote_dir("backend"), "feat/login", "a teammate's work");
+    fx.register(&backend);
+    fx.register(&fx.remote("agent"));
+
+    let workspace = checkout_workspace(&fx.registry(), PROJECT, "feat/login", None, false).unwrap();
+
+    assert_eq!(workspace.kept, ["frontend"]);
+    assert_eq!(workspace.tracked, ["backend"]);
+    assert_eq!(workspace.created, ["agent"]);
+    assert_eq!(
+        head(&path.join("backend"), "HEAD"),
+        head(&fx.remote_dir("backend"), "feat/login")
+    );
+    assert_eq!(
+        git(&path.join("agent"), &["branch", "--show-current"]),
+        "feat/login"
+    );
+}
+
+#[test]
+fn checkout_workspace_undoes_the_branches_it_took_when_a_later_repo_fails() {
+    let fx = fixture_with_repos(&["frontend", "backend"]);
+    commit_on(
+        &fx.remote_dir("frontend"),
+        "feat/login",
+        "a teammate's work",
+    );
+    // git cannot register a worktree when `worktrees` is a file.
+    fs::write(fx.cache_dir("backend").join("worktrees"), "").unwrap();
+
+    let err = checkout_workspace(&fx.registry(), PROJECT, "feat/login", None, false).unwrap_err();
+
+    assert!(matches!(err, Error::CommandFailed { .. }), "{err:?}");
+    assert!(!fx.workspace_dir("feat-login").exists());
+    assert_eq!(git(&fx.cache_dir("frontend"), &["branch", "--list"]), "");
+}
+
+#[test]
+fn a_checked_out_branch_is_pulled_and_a_branch_published_later_is_followed() {
+    let fx = fixture_with_repos(&["frontend", "backend"]);
+    commit_on(&fx.remote_dir("backend"), "feat/login", "a teammate's work");
+    let path = checkout_workspace(&fx.registry(), PROJECT, "feat/login", None, false)
+        .unwrap()
+        .path;
+    commit_on(&fx.remote_dir("backend"), "feat/login", "more work");
+    commit_on(&fx.remote_dir("frontend"), "feat/login", "now here too");
+
+    let report = pull_workspace(&fx.home(), &fx.project(), "feat-login").unwrap();
+
+    let outcomes: Vec<_> = report
+        .iter()
+        .map(|(_, result)| *result.as_ref().unwrap())
+        .collect();
+    assert_eq!(outcomes, [PullOutcome::Updated, PullOutcome::Updated]);
+    for repo in ["frontend", "backend"] {
+        assert_eq!(
+            head(&path.join(repo), "HEAD"),
+            head(&fx.remote_dir(repo), "feat/login")
+        );
+        // So a plain `git pull` and `git status` work there too.
+        assert_eq!(
+            git(
+                &path.join(repo),
+                &["rev-parse", "--abbrev-ref", "@{upstream}"]
+            ),
+            "origin/feat/login"
+        );
+    }
+}
+
+#[test]
+fn remove_workspace_accepts_a_workspace_that_was_only_checked_out() {
+    let fx = fixture_with_repos(&["frontend", "backend"]);
+    commit_on(&fx.remote_dir("backend"), "feat/login", "a teammate's work");
+    let path = checkout_workspace(&fx.registry(), PROJECT, "feat/login", None, false)
+        .unwrap()
+        .path;
+
+    remove_workspace(&fx.registry(), PROJECT, "feat/login", false).unwrap();
+
+    assert!(!path.exists());
+    for repo in ["frontend", "backend"] {
+        assert_eq!(git(&fx.cache_dir(repo), &["branch", "--list"]), "");
+    }
+}
+
+#[test]
+fn status_tells_whether_the_branch_of_a_checkout_is_on_the_remote() {
+    let fx = fixture_with_repos(&["frontend", "backend"]);
+    commit_on(&fx.remote_dir("backend"), "feat/login", "a teammate's work");
+    checkout_workspace(&fx.registry(), PROJECT, "feat/login", None, false).unwrap();
+
+    let status = status(&fx.home(), &fx.project()).unwrap();
+
+    let on_remote: Vec<_> = status.workspaces[0]
+        .checkouts
+        .iter()
+        .map(|checkout| (checkout.repo.as_str(), checkout.on_remote))
+        .collect();
+    assert_eq!(on_remote, [("frontend", false), ("backend", true)]);
+}
+
+#[test]
+fn a_workspace_is_not_shared_by_two_branches_whose_names_give_the_same_folder() {
+    let fx = fixture_with_repos(&["frontend"]);
+    git(&fx.remote_dir("frontend"), &["branch", "feat/login"]);
+    git(&fx.remote_dir("frontend"), &["branch", "feat-login"]);
+    checkout_workspace(&fx.registry(), PROJECT, "feat/login", None, false).unwrap();
+    fx.register(&fx.remote("backend"));
+
+    let taken = |err: Error| {
+        matches!(&err, Error::WorkspaceOfAnotherBranch { name, branch }
+            if name == "feat-login" && branch == "feat/login")
+    };
+    let checked_out =
+        checkout_workspace(&fx.registry(), PROJECT, "feat-login", None, false).unwrap_err();
+    let created = create_workspace(&fx.registry(), PROJECT, "feat-login", None, false).unwrap_err();
+
+    assert!(taken(checked_out));
+    assert!(taken(created));
+    assert!(!fx.workspace_dir("feat-login").join("backend").exists());
 }
 
 #[test]

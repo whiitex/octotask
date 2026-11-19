@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use octotask_core::{
-    Error, PullOutcome, create_workspace, dev_changes, pull_workspace, remove_project,
-    remove_workspace, save_dev_changes, unregister_repo,
+    Error, PullOutcome, checkout_workspace, create_workspace, dev_changes, pull_workspace,
+    remove_project, remove_workspace, save_dev_changes, unregister_repo,
 };
 
 use super::{Fixture, PROJECT, commit_here, git};
@@ -298,6 +298,38 @@ fn a_workspace_is_refused_when_the_dev_changes_no_longer_apply_to_the_base() {
     assert_eq!(read(&other, "my config.yaml"), "db: DeepTree\nmode: prod\n");
     assert_eq!(read(&other, ".env"), "TOKEN=secret\n");
     assert_eq!(status(&other), "");
+}
+
+#[test]
+fn a_checked_out_branch_gets_the_dev_changes_that_apply_to_its_own_commit() {
+    let fx = backend_with_dev_changes();
+    let remote = fx.remote_dir("backend");
+    git(&remote, &["checkout", "--quiet", "-b", "feat/review"]);
+    let reviewed = MAIN_PY.replace("import os", "import os\nimport sys");
+    commit_files(&remote, &[("main.py", &reviewed)]);
+    git(
+        &remote,
+        &["checkout", "--quiet", "-b", "feat/stale", "main"],
+    );
+    let upstream = MAIN_PY.replace("port=8000", "port=8080, workers=4");
+    commit_files(&remote, &[("main.py", &upstream)]);
+
+    checkout_workspace(&fx.registry(), PROJECT, "feat/review", None, false).unwrap();
+    let err = checkout_workspace(&fx.registry(), PROJECT, "feat/stale", None, false).unwrap_err();
+
+    let review = checkout(&fx, "feat-review");
+    assert_eq!(
+        read(&review, "main.py"),
+        reviewed.replace("port=8000", "port=9005")
+    );
+    assert_eq!(read(&review, ".env"), "TOKEN=secret\n");
+    assert_eq!(status(&review), "");
+    assert!(
+        matches!(&err, Error::StaleDevChanges { repo, files }
+            if repo == "backend" && files == &["main.py"]),
+        "{err:?}"
+    );
+    assert!(!fx.workspace_dir("feat-stale").exists());
 }
 
 #[test]

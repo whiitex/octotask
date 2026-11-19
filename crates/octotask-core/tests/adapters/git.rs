@@ -206,6 +206,66 @@ fn a_worktree_deleted_by_hand_is_pruned_and_its_branch_checked_out_again() {
     );
 }
 
+#[test]
+fn a_branch_is_found_only_under_its_exact_name() {
+    let remote = TempDir::new().unwrap();
+    init_repo(remote.path());
+    commit_empty(remote.path());
+    git_setup(remote.path(), &["branch", "Feat/Login"]);
+    let bare = TempDir::new().unwrap();
+    let git = Git::new(bare.path());
+    git.init_bare().unwrap();
+    git.add_origin(&remote.path().display().to_string())
+        .unwrap();
+    git.fetch_origin().unwrap();
+    git.run(&["branch", "Local", "refs/remotes/origin/Feat/Login"])
+        .unwrap();
+
+    assert!(git.origin_branch_exists("Feat/Login").unwrap());
+    assert!(git.branch_exists("Local").unwrap());
+    // A disk that ignores case, as on macOS, makes git find these too.
+    assert!(!git.origin_branch_exists("feat/login").unwrap());
+    assert!(!git.origin_branch_exists("Feat").unwrap());
+    assert!(!git.branch_exists("local").unwrap());
+}
+
+#[test]
+fn tracking_worktree_starts_at_the_remote_branch_and_follows_it() {
+    let remote = TempDir::new().unwrap();
+    init_repo(remote.path());
+    commit_empty(remote.path());
+    commit_on_new_branch(remote.path(), "feat/login", "2023-01-01T00:00:00Z");
+    let bare = TempDir::new().unwrap();
+    let git = Git::new(bare.path());
+    git.init_bare().unwrap();
+    git.add_origin(&remote.path().display().to_string())
+        .unwrap();
+    git.fetch_origin().unwrap();
+    let parent = TempDir::new().unwrap();
+    let worktree = parent.path().join("feature");
+
+    git.add_tracking_worktree(&worktree, "feat/login").unwrap();
+
+    let checkout = Git::new(&worktree);
+    assert_eq!(
+        checkout.current_branch().unwrap().as_deref(),
+        Some("feat/login")
+    );
+    assert_eq!(
+        checkout.run(&["rev-parse", "HEAD"]).unwrap(),
+        Git::new(remote.path())
+            .run(&["rev-parse", "feat/login"])
+            .unwrap()
+    );
+    assert_eq!(
+        checkout
+            .run(&["rev-parse", "--abbrev-ref", "@{upstream}"])
+            .unwrap()
+            .trim_end(),
+        "origin/feat/login"
+    );
+}
+
 /// An empty commit on a new `branch`, made at `date`.
 fn commit_on_new_branch(dir: &Path, branch: &str, date: &str) {
     git_setup(dir, &["checkout", "--quiet", "-b", branch]);
