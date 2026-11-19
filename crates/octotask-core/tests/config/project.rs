@@ -187,6 +187,33 @@ fn invalid_project_name_or_base_is_rejected() {
 }
 
 #[test]
+fn a_branch_name_that_git_refuses_is_rejected() {
+    let refused = [
+        "HEAD",
+        "@",
+        "a@{b",
+        "/feat",
+        "feat//login",
+        ".hidden",
+        "feat/.hidden",
+        "feat.",
+        "feat.lock/login",
+    ];
+    for name in refused {
+        assert!(
+            matches!(
+                Project::new("ok", name),
+                Err(Error::InvalidName { kind: "branch", .. })
+            ),
+            "{name}"
+        );
+    }
+    for name in ["feat/login", "feat/a/b", "release-1.2", "fix_x", "user@fix"] {
+        assert!(Project::new("ok", name).is_ok(), "{name}");
+    }
+}
+
+#[test]
 fn effective_base_prefers_repo_override() {
     let mut p = Project::new("deeptree", "develop").unwrap();
     p.add_repo("git@github.com:org/frontend.git", None, None)

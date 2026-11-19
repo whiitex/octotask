@@ -48,6 +48,8 @@ pub struct Checkout {
     pub path: PathBuf,
     /// `None` on a detached HEAD.
     pub branch: Option<String>,
+    /// Whether the remote had `branch` at the last fetch.
+    pub on_remote: bool,
     /// `None` when the worktree cannot be read.
     pub commit: Option<Commit>,
     /// Why the worktree cannot be read, e.g. its cache is gone.
@@ -60,6 +62,8 @@ pub struct NewWorkspace {
     pub path: PathBuf,
     /// Repos that got a new branch from their base.
     pub created: Vec<String>,
+    /// Repos that got the branch their remote already had.
+    pub tracked: Vec<String>,
     /// Repos whose branch was still in the cache, e.g. after the folder was deleted by hand.
     pub restored: Vec<String>,
     /// Repos whose worktree was already there.
@@ -100,19 +104,40 @@ pub fn create_workspace(
     location: Option<&Location>,
     allow_stale_dev: bool,
 ) -> Result<NewWorkspace> {
-    validate_branch(branch)?;
-    let name = workspace_name(branch);
-    let home = registry.home();
-    let Some(location) = location else {
-        let project = registry.load_project(project_name)?;
-        return add_worktrees_of_project(home, &project, branch, allow_stale_dev);
-    };
-    let (project, newly_placed) = place_workspace(registry, project_name, &name, location)?;
-    add_worktrees_of_project(home, &project, branch, allow_stale_dev).inspect_err(|_| {
-        if newly_placed {
-            let _ = forget_placement(registry, &project, &name);
-        }
-    })
+    let wanted = Wanted::NewBranch;
+    open_workspace(
+        registry,
+        project_name,
+        branch,
+        wanted,
+        location,
+        allow_stale_dev,
+    )
+}
+
+/// Creates the workspace of a `branch` that already exists: a repo whose remote has the
+/// branch gets it, and follows it; any other repo gets a new `branch` from its base, so
+/// the workspace is complete.
+///
+/// A workspace that has every worktree is returned as it is, without a fetch. One that
+/// lacks some gets only those. `location` and `allow_stale_dev` work as in
+/// `create_workspace`.
+pub fn checkout_workspace(
+    registry: &Registry,
+    project_name: &str,
+    branch: &str,
+    location: Option<&Location>,
+    allow_stale_dev: bool,
+) -> Result<NewWorkspace> {
+    let wanted = Wanted::ExistingBranch;
+    open_workspace(
+        registry,
+        project_name,
+        branch,
+        wanted,
+        location,
+        allow_stale_dev,
+    )
 }
 
 /// Deletes the workspace of `branch`: its worktrees, its folder and the local branches.
@@ -136,6 +161,36 @@ pub fn remove_workspace(
     forget_placement(registry, &project, &name)?;
     forget_commands(registry, &project, &name)?;
     Ok(name)
+}
+
+/// Whether the branch of a workspace is one to create, or one that a remote already has.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Wanted {
+    NewBranch,
+    ExistingBranch,
+}
+
+fn open_workspace(
+    registry: &Registry,
+    project_name: &str,
+    branch: &str,
+    wanted: Wanted,
+    location: Option<&Location>,
+    allow_stale_dev: bool,
+) -> Result<NewWorkspace> {
+    validate_branch(branch)?;
+    let name = workspace_name(branch);
+    let home = registry.home();
+    let Some(location) = location else {
+        let project = registry.load_project(project_name)?;
+        return add_worktrees_of_project(home, &project, branch, wanted, allow_stale_dev);
+    };
+    let (project, newly_placed) = place_workspace(registry, project_name, &name, location)?;
+    add_worktrees_of_project(home, &project, branch, wanted, allow_stale_dev).inspect_err(|_| {
+        if newly_placed {
+            let _ = forget_placement(registry, &project, &name);
+        }
+    })
 }
 
 /// Saves `location` as the place of every repo of the workspace.
@@ -207,6 +262,7 @@ fn add_worktrees_of_project(
     home: &Home,
     project: &Project,
     branch: &str,
+    wanted: Wanted,
     allow_stale_dev: bool,
 ) -> Result<NewWorkspace> {
     if project.repos.is_empty() {
@@ -216,14 +272,39 @@ fn add_worktrees_of_project(
     let members = members(home, project, &name);
     let folders = workspace_folders(home, project, &name);
     let path = shown_path(&folders);
+    refuse_workspace_of_another_branch(branch, &name, &members)?;
     if all_have_worktrees(&members)? {
-        return Err(Error::WorkspaceExists { name, path });
+        return match wanted {
+            Wanted::NewBranch => Err(Error::WorkspaceExists { name, path }),
+            Wanted::ExistingBranch => Ok(new_workspace(path, keep_all(&members))),
+        };
     }
     fetch_all(&members)?;
-    let plan = plan_worktrees(project, branch, &members)?;
+    let plan = plan_worktrees(project, branch, wanted, &members)?;
     prepare_dev_changes(branch, &plan, allow_stale_dev)?;
     add_worktrees(branch, &plan, &folders)?;
     Ok(new_workspace(path, plan))
+}
+
+/// `feat/login` and `feat-login` give the same folder: only one of them has the workspace.
+fn refuse_workspace_of_another_branch(branch: &str, name: &str, members: &[Member]) -> Result<()> {
+    for member in members {
+        if !member.has_worktree()? {
+            continue;
+        }
+        // A worktree that cannot be read is reported by `octok status`, not here.
+        let checked_out = member.git().current_branch().ok().flatten();
+        if let Some(other) = checked_out
+            && other != branch
+            && workspace_name(&other) == name
+        {
+            return Err(Error::WorkspaceOfAnotherBranch {
+                name: name.to_string(),
+                branch: other,
+            });
+        }
+    }
+    Ok(())
 }
 
 fn remove_worktrees_of_project(
@@ -502,17 +583,23 @@ enum Step {
     Create {
         start_point: String,
     },
+    /// The branch is on the remote: create the local one from it.
+    Track,
 }
 
 type Plan<'m, 'a> = Vec<(&'m Member<'a>, Step)>;
 
+fn keep_all<'m, 'a>(members: &'m [Member<'a>]) -> Plan<'m, 'a> {
+    members.iter().map(|member| (member, Step::Keep)).collect()
+}
+
 fn plan_worktrees<'m, 'a>(
     project: &Project,
     branch: &str,
+    wanted: Wanted,
     members: &'m [Member<'a>],
 ) -> Result<Plan<'m, 'a>> {
     let mut plan = Vec::new();
-    let mut on_remote = Vec::new();
     for member in members {
         let git = member.cache.git();
         let step = if member.has_worktree()? {
@@ -520,8 +607,7 @@ fn plan_worktrees<'m, 'a>(
         } else if git.branch_exists(branch)? {
             Step::Restore
         } else if git.origin_branch_exists(branch)? {
-            on_remote.push(member.key.to_string());
-            continue;
+            Step::Track
         } else {
             Step::Create {
                 start_point: base_ref(project, member, &git)?,
@@ -529,13 +615,38 @@ fn plan_worktrees<'m, 'a>(
         };
         plan.push((member, step));
     }
+    match wanted {
+        Wanted::NewBranch => refuse_branch_on_a_remote(branch, &plan)?,
+        Wanted::ExistingBranch => refuse_branch_on_no_remote(branch, &plan)?,
+    }
+    Ok(plan)
+}
+
+fn refuse_branch_on_a_remote(branch: &str, plan: &Plan) -> Result<()> {
+    let on_remote: Vec<String> = plan
+        .iter()
+        .filter(|(_, step)| matches!(step, Step::Track))
+        .map(|(member, _)| member.key.to_string())
+        .collect();
     if on_remote.is_empty() {
-        Ok(plan)
+        Ok(())
     } else {
         Err(Error::BranchExists {
             branch: branch.to_string(),
             repos: on_remote,
         })
+    }
+}
+
+/// A workspace that already has the branch somewhere may be completed from the base.
+fn refuse_branch_on_no_remote(branch: &str, plan: &Plan) -> Result<()> {
+    let nowhere = plan
+        .iter()
+        .all(|(_, step)| matches!(step, Step::Create { .. }));
+    if nowhere {
+        Err(Error::BranchNotFound(branch.to_string()))
+    } else {
+        Ok(())
     }
 }
 
@@ -560,6 +671,7 @@ fn prepare_dev_changes(branch: &str, plan: &Plan, allow_stale: bool) -> Result<(
             Step::Keep => continue,
             Step::Restore => format!("refs/heads/{branch}"),
             Step::Create { start_point } => start_point.clone(),
+            Step::Track => origin_ref(branch),
         };
         let stale = member.dev.prepare(member.cache.dir(), &rev)?;
         if !stale.is_empty() && !allow_stale {
@@ -598,12 +710,14 @@ fn add_worktree(member: &Member, branch: &str, step: &Step) -> Result<()> {
         Step::Create { start_point } => {
             git.add_worktree(&member.worktree, branch, start_point)?;
         }
+        Step::Track => git.add_tracking_worktree(&member.worktree, branch)?,
     }
     member.dev.copy_new_files(&member.worktree)
 }
 
 /// Best effort: the error that triggered the cleanup is the one worth reporting.
-/// Only the branches created by this run are deleted: they are still at the base commit.
+/// Only the branches created by this run are deleted: they are still at a commit of the
+/// remote.
 fn undo_worktrees(added: &[(&Member, Step)], branch: &str, folders: &[Folder]) {
     for (member, step) in added {
         if matches!(step, Step::Keep) {
@@ -611,7 +725,7 @@ fn undo_worktrees(added: &[(&Member, Step)], branch: &str, folders: &[Folder]) {
         }
         if let Ok(_lock) = member.cache.lock() {
             let _ = member.cache.git().remove_worktree(&member.worktree);
-            if matches!(step, Step::Create { .. }) {
+            if matches!(step, Step::Create { .. } | Step::Track) {
                 let _ = member.cache.git().delete_branch(branch);
             }
         }
@@ -626,6 +740,7 @@ fn new_workspace(path: PathBuf, plan: Plan) -> NewWorkspace {
     let mut workspace = NewWorkspace {
         path,
         created: Vec::new(),
+        tracked: Vec::new(),
         restored: Vec::new(),
         kept: Vec::new(),
         remote_worktrees: Vec::new(),
@@ -640,6 +755,7 @@ fn new_workspace(path: PathBuf, plan: Plan) -> NewWorkspace {
             Step::Keep => workspace.kept.push(key),
             Step::Restore => workspace.restored.push(key),
             Step::Create { .. } => workspace.created.push(key),
+            Step::Track => workspace.tracked.push(key),
         }
     }
     workspace
@@ -771,6 +887,8 @@ fn pull_worktree(member: &Member) -> Result<PullOutcome> {
     if !git.origin_branch_exists(&branch)? {
         return Ok(PullOutcome::NoRemoteBranch);
     }
+    // A branch that was new here and was pushed from elsewhere does not follow it yet.
+    git.follow_origin_branch(&branch)?;
     let remote = origin_ref(&branch);
     if git.is_ancestor(&remote, "HEAD")? {
         return Ok(PullOutcome::UpToDate);
@@ -822,17 +940,23 @@ fn checkout(member: &Member) -> Option<Checkout> {
         if !has_worktree {
             return Ok(None);
         }
-        Ok(Some((git.current_branch()?, git.last_commit("HEAD")?)))
+        let branch = git.current_branch()?;
+        let on_remote = match &branch {
+            Some(branch) => git.origin_branch_exists(branch)?,
+            None => false,
+        };
+        Ok(Some((branch, on_remote, git.last_commit("HEAD")?)))
     });
-    let (branch, commit, error) = match read {
+    let (branch, on_remote, commit, error) = match read {
         Ok(None) => return None,
-        Ok(Some((branch, commit))) => (branch, Some(commit), None),
-        Err(error) => (None, None, Some(error.to_string())),
+        Ok(Some((branch, on_remote, commit))) => (branch, on_remote, Some(commit), None),
+        Err(error) => (None, false, None, Some(error.to_string())),
     };
     Some(Checkout {
         repo: member.key.to_string(),
         path: member.shown_worktree(),
         branch,
+        on_remote,
         commit,
         error,
     })

@@ -59,10 +59,12 @@ pub enum Error {
     #[error("repo `{repo}` has no branch `{base}` on its remote")]
     BaseNotFound { repo: String, base: String },
     #[error(
-        "branch `{branch}` already exists on the remote of: {}\nchoose another name, or delete the existing branch first",
+        "branch `{branch}` already exists on the remote of: {}\ncheck it out with `octok checkout {branch}`, or choose another name",
         .repos.join(", ")
     )]
     BranchExists { branch: String, repos: Vec<String> },
+    #[error("no repo has a branch `{0}` on its remote: create it with `octok checkout -b {0}`")]
+    BranchNotFound(String),
     #[error(
         "workspace `{name}` has work that would be lost:\n{}\nremove it anyway with `octok rm --force <branch>`",
         indented(.reasons)
@@ -76,9 +78,15 @@ pub enum Error {
         project: String,
         workspaces: Vec<String>,
     },
+    #[error(
+        "workspace `{name}` is the one of the branch `{branch}`, whose name gives the same folder\nremove it with `octok rm {branch}`, or use another branch name"
+    )]
+    WorkspaceOfAnotherBranch { name: String, branch: String },
     #[error("workspace `{name}` already exists at {path}")]
     WorkspaceExists { name: String, path: PathBuf },
-    #[error("no workspace for `{0}`: create it with `octok checkout -b {0}`")]
+    #[error(
+        "no workspace for `{0}`: create it with `octok checkout <branch>`, or with `octok checkout -b <branch>` for a new branch"
+    )]
     WorkspaceNotFound(String),
     #[error("not inside a workspace: pass its branch, as in `{0}`")]
     NotInWorkspace(&'static str),
@@ -88,10 +96,12 @@ pub enum Error {
     NothingToRun(String),
     #[error("repo `{0}` has no `run` command: set one with `octok repo set {0} --run <command>`")]
     NoRunCommand(String),
-    #[error("repo `{repo}` has no worktree in workspace `{workspace}`: add it with `octok branch`")]
+    #[error(
+        "repo `{repo}` has no worktree in workspace `{workspace}`: add it with `octok checkout <branch>`"
+    )]
     NoWorktree { repo: String, workspace: String },
     #[error(
-        "the dev changes of `{repo}` no longer apply to: {}\nThe branch changed the same lines. `--allow-stale-dev` creates the workspace with those files as they are in git: make the dev changes again there, then run `octok dev save`.",
+        "the dev changes of `{repo}` no longer apply to: {}\nThe branch changed the same lines, or lacks those files. `--allow-stale-dev` creates the workspace with those files as they are in git: make the dev changes again there, then run `octok dev save`.",
         .files.join(", ")
     )]
     StaleDevChanges { repo: String, files: Vec<String> },

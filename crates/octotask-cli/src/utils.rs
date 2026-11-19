@@ -4,7 +4,8 @@ use std::os::unix::process::ExitStatusExt;
 use std::process::{ExitCode, ExitStatus};
 
 use octotask_core::{
-    Checkout, Commit, DevChanges, Project, PullOutcome, Result, Status, UpEvent, WorkspaceStatus,
+    Checkout, Commit, DevChanges, NewWorkspace, Project, PullOutcome, Result, Status, UpEvent,
+    WorkspaceStatus,
 };
 use serde_json::json;
 use signal_hook::consts::SIGKILL;
@@ -61,6 +62,39 @@ pub(crate) fn print_pull_report(
     report: Vec<(String, Result<PullOutcome>)>,
 ) -> ExitCode {
     print_report(project, report, |outcome| pull_message(outcome).to_string())
+}
+
+/// Says on stderr what creating or completing a workspace did. Silent when the workspace
+/// was already complete.
+pub(crate) fn print_new_workspace(project_name: &str, name: &str, workspace: &NewWorkspace) {
+    let NewWorkspace {
+        created,
+        tracked,
+        restored,
+        kept,
+        ..
+    } = workspace;
+    if created.is_empty() && tracked.is_empty() && restored.is_empty() {
+        return;
+    }
+    if kept.is_empty() && restored.is_empty() {
+        eprintln!("created workspace `{name}` in {project_name}");
+    } else {
+        eprintln!("completed workspace `{name}` in {project_name}");
+    }
+    if !restored.is_empty() {
+        eprintln!("  branch restored from the cache: {}", restored.join(", "));
+    }
+    if !tracked.is_empty() {
+        eprintln!("  branch from the remote: {}", tracked.join(", "));
+    }
+    let only_new_branches = kept.is_empty() && tracked.is_empty();
+    if !created.is_empty() && !only_new_branches {
+        eprintln!("  new branch from the base: {}", created.join(", "));
+    }
+    for (repo, worktree) in &workspace.remote_worktrees {
+        eprintln!("  {repo}: {}", worktree.display());
+    }
 }
 
 /// Prints one line per repo on stdout and the errors on stderr. Fails if any repo failed.
@@ -343,12 +377,13 @@ fn print_checkouts(status: &Status, workspace: &WorkspaceStatus) {
         .unwrap_or("<branch>");
     for (repo, label) in status.repos.iter().zip(labels) {
         let detail = match checkout_of(&repo.key) {
-            None => format!("no worktree: add it with `octok branch {workspace_branch}`"),
+            None => format!("no worktree: add it with `octok checkout {workspace_branch}`"),
             Some(checkout) => match &checkout.commit {
                 Some(commit) => format!(
-                    "{:branch_width$}  {}{}",
+                    "{:branch_width$}  {}{}{}",
                     branch_label(checkout),
                     commit_line(commit, sha_width),
+                    unpublished(checkout),
                     place_elsewhere(workspace, checkout)
                 ),
                 None => format!(
@@ -368,6 +403,15 @@ fn place_elsewhere(workspace: &WorkspaceStatus, checkout: &Checkout) -> String {
         String::new()
     } else {
         format!("  [{}]", checkout.path.display())
+    }
+}
+
+/// Marks a branch that the remote does not have: a new one, not pushed yet.
+fn unpublished(checkout: &Checkout) -> &'static str {
+    if checkout.branch.is_some() && !checkout.on_remote {
+        "  [not on the remote]"
+    } else {
+        ""
     }
 }
 

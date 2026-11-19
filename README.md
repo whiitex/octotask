@@ -7,6 +7,7 @@ Working on it means creating the same branch in each of them, keeping them up to
 `octok` groups those repositories into a **project** and gives each feature a **workspace**: one folder with a checkout of every repository, all on the same branch.
 
 - **One command for all repos.** `octok branch feat/login` creates the branch in every repository, starting from a freshly fetched base branch.
+- **A teammate's branch in one command.** `octok checkout feat/login` builds the workspace of a branch that already exists: each repository that has the branch gets it, the others start from their base.
 - **Isolated workspaces.** Each workspace is a set of `git worktree`s, so several features can be open side by side without stashing or switching branches.
 - **No repeated downloads.** Each repository is cloned once into a cache, and every workspace is created from it in an instant.
 - **Plain git underneath.** `octok` calls your own `git`, so your credentials, SSH config and hooks apply, and every checkout is a normal git working tree.
@@ -32,8 +33,8 @@ repos:
 
 workspaces:
   feat-login  /Users/you/.octotask/workspaces/shop/feat-login
-    shop-frontend (frontend)  feat/login  4f2a91c  Add cart page (2 days ago)
-    shop-backend (backend)    feat/login  a81d0e3  Fix order totals (5 hours ago)
+    shop-frontend (frontend)  feat/login  4f2a91c  Add cart page (2 days ago)  [not on the remote]
+    shop-backend (backend)    feat/login  a81d0e3  Fix order totals (5 hours ago)  [not on the remote]
 ```
 
 ## Installation
@@ -181,14 +182,14 @@ It is named after its branch, with `/` replaced by `-`: the branch `feat/login` 
 |---|---|
 | `octok branch <branch> [--location <location>] [--allow-stale-dev]` | Fetches every repository, creates `<branch>` from its up-to-date base branch and checks it out in a new workspace, with the [dev changes](#dev-changes-octok-dev) of each repository. Prints the path of the workspace. With `--location`, the whole workspace lives on that machine. |
 | `octok checkout -b <branch>` | Same as `octok branch <branch>`. |
-| `octok checkout <branch>` | Prints the path of an existing workspace. |
+| `octok checkout <branch> [--location <location>] [--allow-stale-dev]` | Prints the path of the workspace of `<branch>`. Creates it first when the branch is already on a remote: see [Branches that already exist](#branches-that-already-exist). |
 | `octok rm <branch> [--force]` | Deletes a workspace: its checkouts, its folder and its local branches. |
 
 A program cannot change the folder of the shell that started it, so enter a workspace with `cd`:
 
 ```sh
-cd "$(octok branch feat/login)"     # create and enter
-cd "$(octok checkout feat/login)"   # enter an existing one
+cd "$(octok branch feat/login)"     # create a new branch and enter
+cd "$(octok checkout feat/login)"   # enter the workspace of an existing branch
 ```
 
 **Publishing a branch.**
@@ -196,16 +197,38 @@ The new branch exists only on your machine.
 A plain `git push` inside a checkout publishes it and sets its upstream, with no need for `-u origin <branch>`.
 
 **Completing a workspace.**
-Run `octok branch <branch>` again on an existing workspace to add the checkouts it lacks.
+Run `octok checkout <branch>` on an existing workspace to add the checkouts it lacks.
 This brings in a repository registered after the workspace was created, finishes a creation that was interrupted, and restores a checkout whose folder was deleted by hand, with its commits.
+`octok branch <branch>` does the same, as long as the branch is on no remote.
 
-**Branches that already exist.**
-`octok branch` refuses a branch that is already on the remote of a repository.
+**Two branches, one folder.**
+`feat/login` and `feat-login` give the same workspace name, so only one of them can have a workspace: the second is refused.
 
 **Removing safely.**
 `octok rm` refuses to delete a workspace that holds uncommitted changes, unpushed commits or files that do not belong to a checkout, and lists what it found.
 `--force` deletes the workspace anyway and discards that work.
 Files ignored by git, such as `.env`, are deleted without a warning, and so are the dev changes: they are saved elsewhere.
+
+#### Branches that already exist
+
+`octok checkout <branch>` is for a branch that someone already pushed, such as the pull request of a teammate or of an agent:
+
+```console
+$ cd "$(octok checkout feat/login)"
+created workspace `feat-login` in shop
+  branch from the remote: shop-backend
+  new branch from the base: shop-frontend
+```
+
+- **A repository that has the branch on its remote** gets a local branch at the same commit, which follows the remote one: `git pull`, `git push` and `octok pull` work on it.
+- **A repository that does not have it** gets a new branch with that name from its up-to-date base, as with `octok branch`, so the workspace is complete and `octok up` can start everything.
+  The branch stays on your machine until you push it.
+  If the branch is pushed to that repository later, `octok pull` makes the local branch follow it.
+- **A workspace that is already complete** is left alone: the command only prints its path, without a fetch.
+- **A workspace that lacks some checkouts** gets them.
+- **A branch that is on no remote** is refused: create it with `octok branch <branch>` or `octok checkout -b <branch>`.
+
+`octok branch` refuses a branch that is already on the remote of a repository, so a new name never lands on someone else's work by mistake.
 
 ### Locations: `--location`
 
@@ -361,14 +384,14 @@ $ grep port main.py                    # the new workspace has them
   Commit your real work before saving: whatever is not committed counts as a dev change.
 - **Changing them.** Edit the files in a checkout and run `octok dev save` again: what is saved follows the checkout.
   Saving from a checkout with no dev changes left removes them.
-- **New workspaces.** `octok branch` puts the dev changes in every checkout it creates.
+- **New workspaces.** `octok branch` and `octok checkout` put the dev changes in every checkout they create.
   The workspaces that already exist keep what they have.
 - **Commits.** A tracked file with dev changes can still be edited and committed: the commit holds your edit and not the dev changes, which stay in the file on disk.
   `git status` and `git diff` do not show them: `octok dev show` does.
   The files that git does not track are ignored by git in every checkout.
 - **Lines that clash.** A change to the very lines of a dev change cannot be told apart from it, so git refuses to stage that file and says so.
   If it is a new dev change, run `octok dev save`.
-- **A base branch that changed the same lines.** The dev changes of that file can no longer be applied, and `octok branch` creates nothing and names the file.
+- **A branch that changed the same lines.** The dev changes of that file can no longer be applied to the commit a checkout starts from, and `octok branch` or `octok checkout` creates nothing and names the file.
   `--allow-stale-dev` creates the workspace with that file as it is in git: make the dev changes again there, then run `octok dev save`.
 - **Where they are kept.** Under the `octok` home of the machine where the repository lives, in `dev/<project>/<repo>`, so a `.env` never leaves that machine.
   Inside, `dev/changed` holds the tracked files with their dev changes, `dev/new` the files that git does not track, and `base` the tracked files as git had them when they were saved.
@@ -382,7 +405,7 @@ $ grep port main.py                    # the new workspace has them
 It does not contact the git remotes, and it connects over `ssh` only to the other machines of the project:
 
 - every repository, with its base branch and the last commit of that branch at the last fetch;
-- every workspace, with the branch and the last commit of each checkout;
+- every workspace, with the branch and the last commit of each checkout, marked `[not on the remote]` when the branch was not on the remote at the last fetch;
 - the problems it finds: a repository that was never fetched, a base branch missing on the remote, a repository with no checkout in a workspace, a checkout that cannot be read, and clones left behind by repositories that are no longer in the project.
 
 ## Development

@@ -715,6 +715,104 @@ fn checkout_b_creates_and_plain_checkout_prints_the_path() {
 }
 
 #[test]
+fn checkout_creates_the_workspace_of_a_branch_that_is_already_on_a_remote() {
+    let env = Env::with_repos(&["frontend", "backend"]);
+    commit_on_new_branch(
+        &env.remote_dir("backend"),
+        "feat/login",
+        "2023-01-01T00:00:00Z",
+    );
+    let path = env.workspace_dir("feat-login");
+
+    env.octok(&["checkout", "feat/login"])
+        .assert()
+        .success()
+        .stdout(format!("{}\n", path.display()))
+        .stderr(
+            "created workspace `feat-login` in deeptree\n  \
+             branch from the remote: backend\n  \
+             new branch from the base: frontend\n",
+        );
+
+    let head = |dir: &Path, rev: &str| git(dir, &["rev-parse", rev]);
+    assert_eq!(
+        head(&path.join("backend"), "HEAD"),
+        head(&env.remote_dir("backend"), "feat/login")
+    );
+    assert_eq!(
+        git(&path.join("frontend"), &["branch", "--show-current"]),
+        "feat/login"
+    );
+    assert_eq!(
+        head(&path.join("frontend"), "HEAD"),
+        head(&env.remote_dir("frontend"), "main")
+    );
+    env.octok(&["checkout", "feat/login"])
+        .assert()
+        .success()
+        .stdout(format!("{}\n", path.display()))
+        .stderr("");
+    env.octok(&["rm", "feat/login"]).assert().success();
+}
+
+#[test]
+fn checkout_of_a_branch_that_is_on_no_remote_is_refused_with_a_hint() {
+    let env = Env::with_repos(&["frontend", "backend"]);
+
+    env.octok(&["checkout", "feat/nope"])
+        .assert()
+        .code(1)
+        .stdout("")
+        .stderr(
+            "error: no repo has a branch `feat/nope` on its remote: \
+             create it with `octok checkout -b feat/nope`\n",
+        );
+
+    assert!(!env.workspace_dir("feat-nope").exists());
+}
+
+#[test]
+fn checkout_puts_the_workspace_of_an_existing_branch_on_another_machine() {
+    let env = Env::new();
+    env.octok(&["project", "init", "deeptree", "--base", "main"])
+        .assert()
+        .success();
+    let url = env.remote_with_branch("frontend", "feat/there");
+    env.octok(&["repo", "add", &url]).assert().success();
+    let there = env.machine_root().join("workspaces/deeptree/feat-there");
+
+    env.octok(&["checkout", "feat/there", "--location", "vm"])
+        .assert()
+        .success()
+        .stdout(format!("vm:{}\n", there.display()));
+
+    assert_eq!(
+        git(&there.join("frontend"), &["branch", "--show-current"]),
+        "feat/there"
+    );
+}
+
+#[test]
+fn status_marks_the_checkouts_whose_branch_is_not_on_the_remote() {
+    let env = Env::with_repos(&["frontend", "backend"]);
+    git(&env.remote_dir("backend"), &["branch", "feat/login"]);
+    env.octok(&["checkout", "feat/login"]).assert().success();
+
+    let rows: Vec<String> = env
+        .stdout(&["status"])
+        .lines()
+        .filter(|line| line.contains("feat/login"))
+        .map(str::to_string)
+        .collect();
+    let checkouts = env.json(&["status", "--json"])["workspaces"][0]["checkouts"].clone();
+
+    assert!(rows[0].ends_with("  [not on the remote]"), "{}", rows[0]);
+    assert!(!rows[1].contains("not on the remote"), "{}", rows[1]);
+    assert_eq!(checkouts[0]["on_remote"], false);
+    assert_eq!(checkouts[1]["on_remote"], true);
+}
+
+#[test]
 fn branch_that_already_exists_is_refused_with_a_hint() {
     let env = Env::with_repos(&["frontend", "backend"]);
     git(&env.remote_dir("backend"), &["branch", "feat/login"]);
@@ -725,7 +823,7 @@ fn branch_that_already_exists_is_refused_with_a_hint() {
         .stdout("")
         .stderr(
             "error: branch `feat/login` already exists on the remote of: backend\n\
-             choose another name, or delete the existing branch first\n",
+             check it out with `octok checkout feat/login`, or choose another name\n",
         );
 
     assert!(!env.workspace_dir("feat-login").exists());
@@ -831,7 +929,8 @@ fn status_text_shows_project_repos_and_workspaces() {
     env.octok(&["status"]).assert().success().stdout(format!(
         "project: deeptree\n\n\
          repos:\n  frontend  main  {line}\n\n\
-         workspaces:\n  feat-login  {}\n    frontend  feat/login  {line}\n",
+         workspaces:\n  feat-login  {}\n    \
+         frontend  feat/login  {line}  [not on the remote]\n",
         env.workspace_dir("feat-login").display()
     ));
 }
@@ -1022,7 +1121,7 @@ fn branch_on_an_existing_workspace_adds_the_repos_that_joined_later() {
         .stdout(format!("{}\n", path.display()))
         .stderr(
             "completed workspace `feat-login` in deeptree\n\
-             \x20 new branch: backend\n",
+             \x20 new branch from the base: backend\n",
         );
     env.octok(&["branch", "feat/login"])
         .assert()
@@ -1123,7 +1222,7 @@ fn status_text_points_out_a_repo_without_worktree_in_a_workspace() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "    backend   no worktree: add it with `octok branch feat/login`\n",
+            "    backend   no worktree: add it with `octok checkout feat/login`\n",
         ));
 }
 
@@ -1364,7 +1463,7 @@ fn pull_and_rm_reach_the_worktrees_on_the_other_machine() {
         ),
         ""
     );
-    env.octok(&["checkout", "feat/login"]).assert().code(1);
+    env.octok(&["pull", "feat/login"]).assert().code(1);
 }
 
 #[test]

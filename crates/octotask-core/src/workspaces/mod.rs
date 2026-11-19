@@ -15,6 +15,7 @@ pub use repos::{
 };
 pub use up::{Running, Stopper, UpEvent, start_workspace};
 pub use workspace::{
-    Checkout, NewWorkspace, PullOutcome, RepoStatus, Status, WorkspaceStatus, create_workspace,
-    locate_workspace, pull_workspace, remove_workspace, status, workspace_name, workspace_path,
+    Checkout, NewWorkspace, PullOutcome, RepoStatus, Status, WorkspaceStatus, checkout_workspace,
+    create_workspace, locate_workspace, pull_workspace, remove_workspace, status, workspace_name,
+    workspace_path,
 };

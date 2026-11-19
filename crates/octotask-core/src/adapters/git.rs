@@ -159,6 +159,32 @@ impl Git {
         .map(drop)
     }
 
+    /// Creates `branch` from the branch of `origin` with the same name, which it then
+    /// follows, and checks it out in a new worktree at `path`.
+    pub fn add_tracking_worktree(&self, path: &Path, branch: &str) -> Result<()> {
+        let path = path.to_string_lossy();
+        self.run(&[
+            "worktree",
+            "add",
+            "--quiet",
+            "--track",
+            "-b",
+            branch,
+            "--",
+            &path,
+            &origin_ref(branch),
+        ])
+        .map(drop)
+    }
+
+    /// Makes the local `branch` follow the branch of `origin` with the same name, so a
+    /// plain `git pull` and `git status` know about it.
+    pub fn follow_origin_branch(&self, branch: &str) -> Result<()> {
+        let upstream = format!("--set-upstream-to={}", origin_ref(branch));
+        self.run(&["branch", "--quiet", &upstream, "--", branch])
+            .map(drop)
+    }
+
     /// Checks out the existing `branch` in a new worktree at `path`.
     pub fn checkout_worktree(&self, path: &Path, branch: &str) -> Result<()> {
         let path = path.to_string_lossy();
@@ -229,8 +255,11 @@ impl Git {
         self.run(&["merge", "--ff-only", "--quiet", rev]).map(drop)
     }
 
+    /// Compares the names itself: on a disk that ignores case, git finds `Feat/Login`
+    /// when asked for `feat/login`.
     fn ref_exists(&self, full_name: &str) -> Result<bool> {
-        self.check(&["show-ref", "--verify", "--quiet", full_name])
+        let refs = self.run(&["for-each-ref", "--format=%(refname)", full_name])?;
+        Ok(refs.lines().any(|name| name == full_name))
     }
 
     fn place(&self) -> Place<'_> {

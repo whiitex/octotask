@@ -9,11 +9,11 @@ use std::thread;
 
 use clap::{Args, Parser, Subcommand};
 use octotask_core::{
-    Error, Home, Location, NewRepo, OriginBranches, Project, Registry, RepoChanges, Result, Ssh,
-    Stopper, create_workspace, dev_changes, fetch_repos, locate_workspace, pull_workspace,
-    register_repo, remove_project, remove_workspace, resolve_location, save_dev_changes,
-    set_project_location, set_workspace_run, start_workspace, status, unregister_repo, update_repo,
-    workspace_name, workspace_path,
+    Error, Home, Location, NewRepo, NewWorkspace, OriginBranches, Project, Registry, RepoChanges,
+    Result, Ssh, Stopper, checkout_workspace, create_workspace, dev_changes, fetch_repos,
+    locate_workspace, pull_workspace, register_repo, remove_project, remove_workspace,
+    resolve_location, save_dev_changes, set_project_location, set_workspace_run, start_workspace,
+    status, unregister_repo, update_repo, workspace_name,
 };
 use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
@@ -22,8 +22,9 @@ use prompts::{
     DEFAULT_BASE, RepoSettings, ask_location, ask_project_base, ask_repo_base, ask_repo_settings,
 };
 use utils::{
-    LOCAL, confirm, print_dev_changes, print_dev_changes_json, print_projects, print_pull_report,
-    print_report, print_repos, print_status, print_up_event, repo_label, up_labels,
+    LOCAL, confirm, print_dev_changes, print_dev_changes_json, print_new_workspace, print_projects,
+    print_pull_report, print_report, print_repos, print_status, print_up_event, repo_label,
+    up_labels,
 };
 
 /// Exit code of a command ended by Ctrl-C, as shells report it.
@@ -54,8 +55,10 @@ enum Command {
     /// Create a workspace: one worktree per repo, on a new branch from the up-to-date base
     ///
     /// On a workspace that already exists, adds the worktrees it lacks: this completes an
-    /// interrupted creation and brings in the repos registered later.
+    /// interrupted creation and brings in the repos registered later. Refuses a branch
+    /// that is already on a remote: `octok checkout <branch>` is for that.
     Branch {
+        /// Name of the new branch
         name: String,
         /// Machine where the whole workspace lives, whatever the repos and the project say:
         /// `local`, `<host>` or `<host>:<path>`
@@ -71,19 +74,27 @@ enum Command {
         /// Also discard uncommitted changes and unpushed commits
         #[arg(long)]
         force: bool,
+        /// Branch of the workspace
         branch: String,
     },
-    /// Print the path of a workspace, e.g. `cd "$(octok checkout feat/login)"`
+    /// Print the path of the workspace of a branch, creating it when the branch is on a remote
+    ///
+    /// Use it as `cd "$(octok checkout feat/login)"`. When the workspace is not there
+    /// yet, a repo that has the branch on its remote gets it, and any other repo gets a
+    /// new branch from its base. On a workspace that lacks some worktrees, adds them.
     Checkout {
-        /// Create the workspace first, like `octok branch`
+        /// Create a new branch, like `octok branch`
         #[arg(short = 'b')]
         create: bool,
+        /// Branch of the workspace
         branch: String,
-        /// With `-b`: machine where the whole workspace lives
-        #[arg(long, requires = "create")]
+        /// Machine where the whole workspace lives, whatever the repos and the project say:
+        /// `local`, `<host>` or `<host>:<path>`
+        #[arg(long)]
         location: Option<String>,
-        /// With `-b`: create the workspace even if some dev changes no longer apply
-        #[arg(long, requires = "create")]
+        /// Create the workspace even if some dev changes no longer apply: the files they
+        /// are for are left as they are in git
+        #[arg(long)]
         allow_stale_dev: bool,
     },
     /// Fetch, then fast-forward each worktree of a workspace to its remote branch
@@ -329,30 +340,31 @@ fn run(cli: Cli) -> Result<ExitCode> {
             name: branch,
             location,
             allow_stale_dev,
+        } => {
+            let workspace = WorkspaceRequest {
+                branch: &branch,
+                location: location.as_deref(),
+                allow_stale_dev,
+            };
+            open(&registry, &resolve_project()?, create_workspace, &workspace)?
         }
-        | Command::Checkout {
-            create: true,
+        Command::Checkout {
+            create,
             branch,
             location,
             allow_stale_dev,
         } => {
-            let location = location.as_deref();
-            create(
-                &registry,
-                &resolve_project()?,
-                &branch,
-                location,
+            let open_workspace: OpenWorkspace = if create {
+                create_workspace
+            } else {
+                checkout_workspace
+            };
+            let workspace = WorkspaceRequest {
+                branch: &branch,
+                location: location.as_deref(),
                 allow_stale_dev,
-            )?
-        }
-        Command::Checkout {
-            create: false,
-            branch,
-            ..
-        } => {
-            let project = registry.load_project(&resolve_project()?)?;
-            let path = workspace_path(registry.home(), &project, &branch)?;
-            println!("{}", path.display());
+            };
+            open(&registry, &resolve_project()?, open_workspace, &workspace)?
         }
         Command::Rm { force, branch } => {
             let project_name = resolve_project()?;
@@ -571,35 +583,32 @@ fn fetch(registry: &Registry, project_name: &str) -> Result<ExitCode> {
     Ok(print_report(&project, report, |()| "fetched".to_string()))
 }
 
+/// What `octok branch` and `octok checkout` ask for.
+struct WorkspaceRequest<'a> {
+    branch: &'a str,
+    location: Option<&'a str>,
+    allow_stale_dev: bool,
+}
+
+/// `create_workspace` for a new branch, `checkout_workspace` for one that exists.
+type OpenWorkspace = fn(&Registry, &str, &str, Option<&Location>, bool) -> Result<NewWorkspace>;
+
 /// Prints only the path on stdout, so `cd "$(octok branch <name>)"` works.
-fn create(
+fn open(
     registry: &Registry,
     project_name: &str,
-    branch: &str,
-    location: Option<&str>,
-    allow_stale_dev: bool,
+    open_workspace: OpenWorkspace,
+    request: &WorkspaceRequest,
 ) -> Result<()> {
-    let location = resolve_optional_location(location)?;
-    let location = location.as_ref();
-    let workspace = create_workspace(registry, project_name, branch, location, allow_stale_dev)?;
-    let name = workspace_name(branch);
-    if workspace.kept.is_empty() && workspace.restored.is_empty() {
-        eprintln!("created workspace `{name}` in {project_name}");
-    } else {
-        eprintln!("completed workspace `{name}` in {project_name}");
-    }
-    if !workspace.restored.is_empty() {
-        eprintln!(
-            "  branch restored from the cache: {}",
-            workspace.restored.join(", ")
-        );
-    }
-    if !workspace.kept.is_empty() && !workspace.created.is_empty() {
-        eprintln!("  new branch: {}", workspace.created.join(", "));
-    }
-    for (repo, worktree) in &workspace.remote_worktrees {
-        eprintln!("  {repo}: {}", worktree.display());
-    }
+    let location = resolve_optional_location(request.location)?;
+    let workspace = open_workspace(
+        registry,
+        project_name,
+        request.branch,
+        location.as_ref(),
+        request.allow_stale_dev,
+    )?;
+    print_new_workspace(project_name, &workspace_name(request.branch), &workspace);
     println!("{}", workspace.path.display());
     Ok(())
 }
