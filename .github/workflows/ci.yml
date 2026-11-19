@@ -50,5 +50,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Fail if a job failed
-        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        # Without `always()` the step is skipped exactly when a job failed, and this job passes.
+        if: always() && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled'))
         run: exit 1
