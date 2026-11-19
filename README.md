@@ -15,6 +15,7 @@ Working on it means creating the same branch in each of them, keeping them up to
 - **Repos on other machines.** A repository can live on another machine, such as a VM, reached over `ssh`: `octok` runs the same commands there.
 - **One command to start everything.** `octok up` starts every repository of a workspace, shows their output together and stops them all at `Ctrl-C`.
 - **Dev changes that follow you.** The local-only edits a repository needs to run on your machine, and files such as `.env`, are saved once, put into every new workspace and kept out of every commit.
+- **Ready for coding agents.** Every command prints JSON with `--json` and says how it failed with its exit code, and a skill teaches an agent to drive `octok`: see [Use with AI agents](#use-with-ai-agents).
 
 ```console
 $ octok project init shop
@@ -447,6 +448,26 @@ It does not contact the git remotes, and it connects over `ssh` only to the othe
 - every repository, with its base branch and the last commit of that branch at the last fetch;
 - every workspace, with the branch and the last commit of each checkout, marked `[not on the remote]` when the branch was not on the remote at the last fetch;
 - the problems it finds: a repository that was never fetched, a base branch missing on the remote, a repository with no checkout in a workspace, a checkout that cannot be read, and clones left behind by repositories that are no longer in the project.
+
+## Use with AI agents
+
+A coding agent with a shell can drive `octok` for a task that touches several repositories.
+The skill in [skills/octotask](skills/octotask/SKILL.md) tells it when to use `octok`, the usual sequence of commands, how to read their JSON output, and what it must never do without asking you, such as `--force`.
+It is in the [Agent Skills](https://agentskills.io) format, which Claude Code, Codex, Cursor and other agents load.
+
+Install it in Claude Code, version 2.1.275 or newer:
+
+```sh
+claude plugin install octotask --marketplace whiitex/octotask
+```
+
+Install it for another agent with the [`skills`](https://github.com/vercel-labs/skills) installer, or copy the folder `skills/octotask` into the skills folder of the agent:
+
+```sh
+npx skills add whiitex/octotask
+```
+
+The agent still needs `octok` itself: see [Installation](#installation).
 
 ## JSON output and exit codes
 
