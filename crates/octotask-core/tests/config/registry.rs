@@ -534,3 +534,30 @@ fn hand_edited_commands_are_checked_on_load() {
     let err = reg.load_project("deeptree").unwrap_err();
     assert!(matches!(err, Error::RepoNotFound(_)), "{err:?}");
 }
+
+#[test]
+fn a_review_is_written_under_its_workspace_and_survives_a_reload() {
+    let (_dir, reg) = registry();
+    reg.init_project("deeptree", "main").unwrap();
+    let reviewed =
+        std::collections::HashMap::from([("backend".to_string(), "feat/login".to_string())]);
+    reg.update_project("deeptree", |p| {
+        p.add_repo("git@github.com:org/backend.git", None, None)?;
+        p.set_review("review-login", "review/login", &reviewed)
+    })
+    .unwrap();
+
+    let raw = fs::read_to_string(reg.home().project_file("deeptree")).unwrap();
+    assert!(
+        raw.contains(
+            "workspaces:\n  review-login:\n    branch: review/login\n    repos:\n      \
+             backend:\n        branch: feat/login\n"
+        ),
+        "{raw}"
+    );
+    let loaded = reg.load_project("deeptree").unwrap();
+    assert_eq!(
+        loaded.review("review-login"),
+        Some(("review/login", reviewed))
+    );
+}

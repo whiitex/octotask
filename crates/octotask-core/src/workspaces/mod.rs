@@ -10,12 +10,12 @@ mod workspace;
 pub use dev::{DevChanges, dev_changes, save_dev_changes};
 pub use project::{remove_project, set_project_location};
 pub use repos::{
-    NewRepo, RepoChanges, fetch_repos, register_repo, set_workspace_run, unregister_repo,
-    update_repo,
+    NewRepo, RepoChanges, check_remote_branch, fetch_repos, register_repo, set_workspace_run,
+    unregister_repo, update_repo,
 };
 pub use up::{Running, Stopper, UpEvent, start_workspace};
 pub use workspace::{
     Checkout, NewWorkspace, PullOutcome, RepoStatus, Status, WorkspaceStatus, checkout_workspace,
-    create_workspace, locate_workspace, pull_workspace, remove_workspace, status, workspace_name,
-    workspace_path,
+    create_workspace, locate_workspace, pull_workspace, remove_workspace, review_workspace, status,
+    workspace_name, workspace_path,
 };

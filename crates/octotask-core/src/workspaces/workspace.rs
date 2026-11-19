@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -36,6 +37,9 @@ pub struct RepoStatus {
 #[derive(Debug, Serialize)]
 pub struct WorkspaceStatus {
     pub name: String,
+    /// The branch of the workspace: the one saved for a review, else the one of its first
+    /// checkout. `None` when no checkout has a branch.
+    pub branch: Option<String>,
     pub path: PathBuf,
     pub checkouts: Vec<Checkout>,
 }
@@ -140,6 +144,55 @@ pub fn checkout_workspace(
     )
 }
 
+/// Creates a workspace to review branches that already exist, one for each repo named in
+/// `chosen`, by key: such a repo gets its branch, and follows it. Any other repo gets a
+/// new `branch` from its base, and `branch` names the workspace.
+///
+/// What the workspace reviews is saved in the project until the workspace is removed, so
+/// any later command completes it with the same branches. A workspace that has every
+/// worktree is returned as it is, and one that lacks some gets only those. Refused when
+/// the workspace exists and was made for something else. `location` and `allow_stale_dev`
+/// work as in `create_workspace`.
+pub fn review_workspace(
+    registry: &Registry,
+    project_name: &str,
+    branch: &str,
+    chosen: &HashMap<String, String>,
+    location: Option<&Location>,
+    allow_stale_dev: bool,
+) -> Result<NewWorkspace> {
+    if chosen.is_empty() {
+        return Err(Error::NothingToReview);
+    }
+    let project = registry.load_project(project_name)?;
+    for (repo, chosen_branch) in chosen {
+        if !project.repos.contains_key(repo) {
+            return Err(Error::RepoNotFound(repo.clone()));
+        }
+        validate_branch(chosen_branch)?;
+    }
+    validate_branch(branch)?;
+    let name = workspace_name(branch);
+    let newly_saved = save_review(registry, &project, &name, branch, chosen)?;
+    let wanted = Wanted::ExistingBranch;
+    open_workspace(
+        registry,
+        project_name,
+        branch,
+        wanted,
+        location,
+        allow_stale_dev,
+    )
+    .inspect_err(|_| {
+        if newly_saved {
+            let _ = registry.update_project(project_name, |project| {
+                project.clear_review(&name);
+                Ok(())
+            });
+        }
+    })
+}
+
 /// Deletes the workspace of `branch`: its worktrees, its folder and the local branches.
 /// Returns the workspace name. Refused when that would lose work, unless `force`.
 ///
@@ -159,15 +212,30 @@ pub fn remove_workspace(
         removed => drop(removed?),
     }
     forget_placement(registry, &project, &name)?;
-    forget_commands(registry, &project, &name)?;
+    forget_settings(registry, &project, &name)?;
     Ok(name)
 }
 
-/// Whether the branch of a workspace is one to create, or one that a remote already has.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Wanted {
+/// What a workspace is opened for.
+#[derive(Clone, Copy)]
+enum Wanted<'a> {
+    /// A branch to create: no remote may have it yet.
     NewBranch,
+    /// A branch that some remote already has.
     ExistingBranch,
+    /// The branch to review in each repo, by key. The other repos get the one of the
+    /// workspace, as with `ExistingBranch`.
+    Review(&'a HashMap<String, String>),
+}
+
+impl<'a> Wanted<'a> {
+    /// The branch chosen for `repo` alone, which its remote must have.
+    fn chosen_branch(self, repo: &str) -> Option<&'a str> {
+        match self {
+            Self::Review(chosen) => chosen.get(repo).map(String::as_str),
+            Self::NewBranch | Self::ExistingBranch => None,
+        }
+    }
 }
 
 fn open_workspace(
@@ -246,10 +314,46 @@ fn forget_placement(registry: &Registry, project: &Project, name: &str) -> Resul
     Ok(())
 }
 
-/// Forgets the commands a workspace had of its own.
-fn forget_commands(registry: &Registry, project: &Project, name: &str) -> Result<()> {
+/// Saves what the workspace `name` reviews. Returns whether it was not saved already.
+/// Fails when the workspace exists and was made for something else.
+fn save_review(
+    registry: &Registry,
+    project: &Project,
+    name: &str,
+    branch: &str,
+    chosen: &HashMap<String, String>,
+) -> Result<bool> {
+    if let Some((saved_branch, saved)) = project.review(name) {
+        if saved_branch == branch && &saved == chosen {
+            return Ok(false);
+        }
+        let reviewed = project
+            .repos
+            .keys()
+            .filter_map(|key| Some(format!("{key}={}", saved.get(key)?)))
+            .collect();
+        return Err(Error::ReviewsOtherBranches {
+            name: name.to_string(),
+            reviewed,
+        });
+    }
+    let folders = workspace_folders(registry.home(), project, name);
+    if any_exists(&folders)? {
+        return Err(Error::WorkspaceExists {
+            name: name.to_string(),
+            path: shown_path(&folders),
+        });
+    }
+    registry.update_project(&project.name, |project| {
+        project.set_review(name, branch, chosen)
+    })?;
+    Ok(true)
+}
+
+/// Forgets the commands a workspace had of its own, and what it reviewed.
+fn forget_settings(registry: &Registry, project: &Project, name: &str) -> Result<()> {
     let settings = project.workspaces.get(name);
-    if settings.is_some_and(|settings| !settings.repos.is_empty()) {
+    if settings.is_some_and(|settings| settings.branch.is_some() || !settings.repos.is_empty()) {
         registry.update_project(&project.name, |project| {
             project.forget_workspace(name);
             Ok(())
@@ -273,16 +377,32 @@ fn add_worktrees_of_project(
     let folders = workspace_folders(home, project, &name);
     let path = shown_path(&folders);
     refuse_workspace_of_another_branch(branch, &name, &members)?;
+    let review = project.review(&name);
+    if let Some((saved_branch, _)) = &review
+        && *saved_branch != branch
+    {
+        return Err(Error::WorkspaceOfAnotherBranch {
+            name,
+            branch: saved_branch.to_string(),
+        });
+    }
     if all_have_worktrees(&members)? {
         return match wanted {
             Wanted::NewBranch => Err(Error::WorkspaceExists { name, path }),
-            Wanted::ExistingBranch => Ok(new_workspace(path, keep_all(&members))),
+            Wanted::ExistingBranch | Wanted::Review(_) => {
+                Ok(new_workspace(path, keep_all(branch, &members)))
+            }
         };
     }
     fetch_all(&members)?;
+    // A workspace that reviews branches is completed with those, whatever asks for it.
+    let wanted = match &review {
+        Some((_, reviewed)) => Wanted::Review(reviewed),
+        None => wanted,
+    };
     let plan = plan_worktrees(project, branch, wanted, &members)?;
-    prepare_dev_changes(branch, &plan, allow_stale_dev)?;
-    add_worktrees(branch, &plan, &folders)?;
+    prepare_dev_changes(&plan, allow_stale_dev)?;
+    add_worktrees(&plan, &folders)?;
     Ok(new_workspace(path, plan))
 }
 
@@ -316,7 +436,7 @@ fn remove_worktrees_of_project(
     let name = workspace_name(branch);
     let members = members(home, project, &name);
     let folders = workspace_folders(home, project, &name);
-    let removals = plan_removals(branch, &members)?;
+    let removals = plan_removals(project, branch, &members)?;
     if !any_exists(&folders)? && removals.iter().all(|removal| removal.branches.is_empty()) {
         return Err(Error::WorkspaceNotFound(branch.to_string()));
     }
@@ -587,46 +707,83 @@ enum Step {
     Track,
 }
 
-type Plan<'m, 'a> = Vec<(&'m Member<'a>, Step)>;
+/// One repo of the workspace, the branch it gets there and what that takes.
+struct Planned<'m, 'a> {
+    member: &'m Member<'a>,
+    branch: &'m str,
+    step: Step,
+}
 
-fn keep_all<'m, 'a>(members: &'m [Member<'a>]) -> Plan<'m, 'a> {
-    members.iter().map(|member| (member, Step::Keep)).collect()
+type Plan<'m, 'a> = Vec<Planned<'m, 'a>>;
+
+fn keep_all<'m, 'a>(branch: &'m str, members: &'m [Member<'a>]) -> Plan<'m, 'a> {
+    let keep = |member| Planned {
+        member,
+        branch,
+        step: Step::Keep,
+    };
+    members.iter().map(keep).collect()
 }
 
 fn plan_worktrees<'m, 'a>(
     project: &Project,
-    branch: &str,
-    wanted: Wanted,
+    branch: &'m str,
+    wanted: Wanted<'m>,
     members: &'m [Member<'a>],
 ) -> Result<Plan<'m, 'a>> {
     let mut plan = Vec::new();
     for member in members {
-        let git = member.cache.git();
-        let step = if member.has_worktree()? {
-            Step::Keep
-        } else if git.branch_exists(branch)? {
-            Step::Restore
-        } else if git.origin_branch_exists(branch)? {
-            Step::Track
-        } else {
-            Step::Create {
-                start_point: base_ref(project, member, &git)?,
-            }
-        };
-        plan.push((member, step));
+        let chosen = wanted.chosen_branch(member.key);
+        let branch = chosen.unwrap_or(branch);
+        let step = plan_step(project, member, branch, chosen.is_some())?;
+        plan.push(Planned {
+            member,
+            branch,
+            step,
+        });
     }
     match wanted {
         Wanted::NewBranch => refuse_branch_on_a_remote(branch, &plan)?,
         Wanted::ExistingBranch => refuse_branch_on_no_remote(branch, &plan)?,
+        Wanted::Review(_) => {}
     }
     Ok(plan)
+}
+
+/// `must_exist` refuses to start `branch` from the base when the remote does not have it.
+fn plan_step(project: &Project, member: &Member, branch: &str, must_exist: bool) -> Result<Step> {
+    let git = member.cache.git();
+    if member.has_worktree()? {
+        return Ok(Step::Keep);
+    }
+    if git.branch_exists(branch)? {
+        return match git.worktree_of_branch(branch)? {
+            None => Ok(Step::Restore),
+            Some(worktree) => Err(Error::BranchInUse {
+                repo: member.key.to_string(),
+                branch: branch.to_string(),
+                path: member.location.shown(&worktree),
+            }),
+        };
+    }
+    if git.origin_branch_exists(branch)? {
+        return Ok(Step::Track);
+    }
+    if must_exist {
+        return Err(Error::BranchNotOnRemote {
+            repo: member.key.to_string(),
+            branch: branch.to_string(),
+        });
+    }
+    let start_point = base_ref(project, member, &git)?;
+    Ok(Step::Create { start_point })
 }
 
 fn refuse_branch_on_a_remote(branch: &str, plan: &Plan) -> Result<()> {
     let on_remote: Vec<String> = plan
         .iter()
-        .filter(|(_, step)| matches!(step, Step::Track))
-        .map(|(member, _)| member.key.to_string())
+        .filter(|planned| matches!(planned.step, Step::Track))
+        .map(|planned| planned.member.key.to_string())
         .collect();
     if on_remote.is_empty() {
         Ok(())
@@ -642,7 +799,7 @@ fn refuse_branch_on_a_remote(branch: &str, plan: &Plan) -> Result<()> {
 fn refuse_branch_on_no_remote(branch: &str, plan: &Plan) -> Result<()> {
     let nowhere = plan
         .iter()
-        .all(|(_, step)| matches!(step, Step::Create { .. }));
+        .all(|planned| matches!(planned.step, Step::Create { .. }));
     if nowhere {
         Err(Error::BranchNotFound(branch.to_string()))
     } else {
@@ -665,8 +822,13 @@ fn base_ref(project: &Project, member: &Member, git: &Git) -> Result<String> {
 /// Makes git keep the saved dev changes in the checkouts about to be added.
 /// Fails when some of them no longer apply to the commit a checkout starts from, unless
 /// `allow_stale`.
-fn prepare_dev_changes(branch: &str, plan: &Plan, allow_stale: bool) -> Result<()> {
-    for (member, step) in plan {
+fn prepare_dev_changes(plan: &Plan, allow_stale: bool) -> Result<()> {
+    for Planned {
+        member,
+        branch,
+        step,
+    } in plan
+    {
         let rev = match step {
             Step::Keep => continue,
             Step::Restore => format!("refs/heads/{branch}"),
@@ -684,29 +846,37 @@ fn prepare_dev_changes(branch: &str, plan: &Plan, allow_stale: bool) -> Result<(
     Ok(())
 }
 
-fn add_worktrees(branch: &str, plan: &Plan, folders: &[Folder]) -> Result<()> {
-    for (done, (member, step)) in plan.iter().enumerate() {
-        let result = member
+fn add_worktrees(plan: &Plan, folders: &[Folder]) -> Result<()> {
+    for (done, planned) in plan.iter().enumerate() {
+        let result = planned
+            .member
             .cache
             .lock()
-            .and_then(|_lock| add_worktree(member, branch, step));
+            .and_then(|_lock| add_worktree(planned));
         if let Err(error) = result {
             // The one that failed may be half done.
-            undo_worktrees(&plan[..=done], branch, folders);
+            undo_worktrees(&plan[..=done], folders);
             return Err(error);
         }
     }
     Ok(())
 }
 
-fn add_worktree(member: &Member, branch: &str, step: &Step) -> Result<()> {
+fn add_worktree(planned: &Planned) -> Result<()> {
+    let Planned {
+        member,
+        branch,
+        step,
+    } = planned;
     let git = member.cache.git();
+    if matches!(step, Step::Keep) {
+        return Ok(());
+    }
+    // A folder deleted by hand is still a worktree for git, which then refuses its path.
+    git.prune_worktrees()?;
     match step {
-        Step::Keep => return Ok(()),
-        Step::Restore => {
-            git.prune_worktrees()?;
-            git.checkout_worktree(&member.worktree, branch)?;
-        }
+        Step::Keep => {}
+        Step::Restore => git.checkout_worktree(&member.worktree, branch)?,
         Step::Create { start_point } => {
             git.add_worktree(&member.worktree, branch, start_point)?;
         }
@@ -718,8 +888,13 @@ fn add_worktree(member: &Member, branch: &str, step: &Step) -> Result<()> {
 /// Best effort: the error that triggered the cleanup is the one worth reporting.
 /// Only the branches created by this run are deleted: they are still at a commit of the
 /// remote.
-fn undo_worktrees(added: &[(&Member, Step)], branch: &str, folders: &[Folder]) {
-    for (member, step) in added {
+fn undo_worktrees(added: &[Planned], folders: &[Folder]) {
+    for Planned {
+        member,
+        branch,
+        step,
+    } in added
+    {
         if matches!(step, Step::Keep) {
             continue;
         }
@@ -745,7 +920,7 @@ fn new_workspace(path: PathBuf, plan: Plan) -> NewWorkspace {
         kept: Vec::new(),
         remote_worktrees: Vec::new(),
     };
-    for (member, step) in plan {
+    for Planned { member, step, .. } in plan {
         let key = member.key.to_string();
         if member.location != Location::Local {
             let worktree = (key.clone(), member.shown_worktree());
@@ -769,23 +944,36 @@ struct Removal<'m, 'a> {
     branches: Vec<String>,
 }
 
-fn plan_removals<'m, 'a>(branch: &str, members: &'m [Member<'a>]) -> Result<Vec<Removal<'m, 'a>>> {
+fn plan_removals<'m, 'a>(
+    project: &Project,
+    branch: &str,
+    members: &'m [Member<'a>],
+) -> Result<Vec<Removal<'m, 'a>>> {
+    let review = project.review(&workspace_name(branch));
     members
         .iter()
         .map(|member| {
             let has_worktree = member.has_worktree()?;
-            let mut branches = Vec::new();
-            if member.cache.exists()? && member.cache.git().branch_exists(branch)? {
-                branches.push(branch.to_string());
-            }
             // A worktree that cannot be read has no branch to add: `force` still removes it.
             let checked_out = has_worktree
                 .then(|| member.git().current_branch().ok().flatten())
                 .flatten();
-            if let Some(checked_out) = checked_out
-                && checked_out != branch
-            {
-                branches.push(checked_out);
+            let reviewed = review
+                .as_ref()
+                .and_then(|(_, reviewed)| reviewed.get(member.key));
+            let saved_branch = review.as_ref().map(|(saved_branch, _)| *saved_branch);
+            let mut branches: Vec<String> = Vec::new();
+            let candidates = [
+                Some(branch),
+                saved_branch,
+                reviewed.map(String::as_str),
+                checked_out.as_deref(),
+            ];
+            for candidate in candidates.into_iter().flatten() {
+                let known = branches.iter().any(|branch| branch == candidate);
+                if !known && belongs_to_removal(member, candidate, checked_out.as_deref())? {
+                    branches.push(candidate.to_string());
+                }
             }
             Ok(Removal {
                 member,
@@ -794,6 +982,19 @@ fn plan_removals<'m, 'a>(branch: &str, members: &'m [Member<'a>]) -> Result<Vec<
             })
         })
         .collect()
+}
+
+/// Whether the local `branch` goes away with the worktree of `member`: it does unless
+/// another workspace has it checked out.
+fn belongs_to_removal(member: &Member, branch: &str, checked_out: Option<&str>) -> Result<bool> {
+    if !member.cache.exists()? {
+        return Ok(false);
+    }
+    let git = member.cache.git();
+    if !git.branch_exists(branch)? {
+        return Ok(false);
+    }
+    Ok(checked_out == Some(branch) || git.worktree_of_branch(branch)?.is_none())
 }
 
 /// Everything that exists only in this workspace, one line per finding.
@@ -921,11 +1122,18 @@ fn repo_status(home: &Home, project: &Project, key: &str, repo: &Repo) -> Result
 }
 
 fn workspace_status(home: &Home, project: &Project, name: String) -> WorkspaceStatus {
-    let checkouts = members(home, project, &name)
+    let checkouts: Vec<Checkout> = members(home, project, &name)
         .iter()
         .filter_map(checkout)
         .collect();
+    let saved_branch = project.review(&name).map(|(branch, _)| branch.to_string());
+    let first_branch = || {
+        checkouts
+            .iter()
+            .find_map(|checkout| checkout.branch.clone())
+    };
     WorkspaceStatus {
+        branch: saved_branch.or_else(first_branch),
         path: shown_path(&workspace_folders(home, project, &name)),
         name,
         checkouts,

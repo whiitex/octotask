@@ -88,7 +88,7 @@ pub(crate) fn print_new_workspace(project_name: &str, name: &str, workspace: &Ne
     if !tracked.is_empty() {
         eprintln!("  branch from the remote: {}", tracked.join(", "));
     }
-    let only_new_branches = kept.is_empty() && tracked.is_empty();
+    let only_new_branches = kept.is_empty() && tracked.is_empty() && restored.is_empty();
     if !created.is_empty() && !only_new_branches {
         eprintln!("  new branch from the base: {}", created.join(", "));
     }
@@ -370,11 +370,7 @@ fn print_checkouts(status: &Status, workspace: &WorkspaceStatus) {
     let label_width = max_width(labels.iter().map(String::as_str));
     let branch_width = max_width(readable().map(branch_label));
     let sha_width = sha_width(readable().filter_map(|c| c.commit.as_ref()));
-    let workspace_branch = workspace
-        .checkouts
-        .iter()
-        .find_map(|c| c.branch.as_deref())
-        .unwrap_or("<branch>");
+    let workspace_branch = workspace.branch.as_deref().unwrap_or("<branch>");
     for (repo, label) in status.repos.iter().zip(labels) {
         let detail = match checkout_of(&repo.key) {
             None => format!("no worktree: add it with `octok checkout {workspace_branch}`"),

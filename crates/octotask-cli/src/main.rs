@@ -1,6 +1,7 @@
 mod prompts;
 mod utils;
 
+use std::collections::HashMap;
 use std::io::{self, IsTerminal, Write};
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -9,17 +10,18 @@ use std::thread;
 
 use clap::{Args, Parser, Subcommand};
 use octotask_core::{
-    Error, Home, Location, NewRepo, NewWorkspace, OriginBranches, Project, Registry, RepoChanges,
-    Result, Ssh, Stopper, checkout_workspace, create_workspace, dev_changes, fetch_repos,
-    locate_workspace, pull_workspace, register_repo, remove_project, remove_workspace,
-    resolve_location, save_dev_changes, set_project_location, set_workspace_run, start_workspace,
-    status, unregister_repo, update_repo, workspace_name,
+    Error, Gh, Home, Location, NewRepo, NewWorkspace, OriginBranches, Project, Registry,
+    RepoChanges, Result, Ssh, Stopper, check_remote_branch, checkout_workspace, create_workspace,
+    dev_changes, fetch_repos, locate_workspace, pull_workspace, register_repo, remove_project,
+    remove_workspace, resolve_location, review_workspace, save_dev_changes, set_project_location,
+    set_workspace_run, start_workspace, status, unregister_repo, update_repo, workspace_name,
 };
 use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
 
 use prompts::{
     DEFAULT_BASE, RepoSettings, ask_location, ask_project_base, ask_repo_base, ask_repo_settings,
+    ask_what_to_review,
 };
 use utils::{
     LOCAL, confirm, print_dev_changes, print_dev_changes_json, print_new_workspace, print_projects,
@@ -116,6 +118,9 @@ enum Command {
     /// Manage the dev changes: what every new workspace gets and no commit contains
     #[command(subcommand)]
     Dev(DevCommand),
+    /// Work with pull requests
+    #[command(subcommand)]
+    Pr(PrCommand),
     /// Show the project, its repos and the checkouts of every workspace
     Status {
         #[arg(long)]
@@ -184,6 +189,71 @@ enum DevCommand {
         #[arg(long)]
         json: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum PrCommand {
+    /// Create a workspace to try pull requests, with each repo on the branch you choose
+    ///
+    /// A repo given with `--pr` gets the branch of that pull request, one given with
+    /// `--branch` gets that branch, and any other repo gets a new branch from its base.
+    /// Without `--pr` and `--branch`, asks at a terminal what to take for each repo.
+    /// Prints the path of the workspace.
+    ///
+    /// Pull requests are read with `gh`, which must be signed in. One that comes from a
+    /// fork is refused. What the workspace reviews is remembered until `octok rm`.
+    Review(ReviewArgs),
+}
+
+#[derive(Args)]
+struct ReviewArgs {
+    /// A pull request to review, as the key or alias of its repo and its number, e.g.
+    /// `backend=12`: can be repeated
+    #[arg(long = "pr", value_name = "REPO=NUMBER", value_parser = repo_and_number)]
+    pull_requests: Vec<(String, u64)>,
+    /// A branch to review, as the key or alias of its repo and its name, e.g.
+    /// `agent=fix/prompt`: can be repeated
+    #[arg(long = "branch", value_name = "REPO=BRANCH", value_parser = repo_and_branch)]
+    branches: Vec<(String, String)>,
+    /// Name of the workspace, and of the branch of the repos left on their base (defaults
+    /// to `pr-<repo>-<number>` of the first pull request, else to the first branch, in
+    /// the order of the repos of the project)
+    #[arg(long)]
+    name: Option<String>,
+    /// Machine where the whole workspace lives, whatever the repos and the project say:
+    /// `local`, `<host>` or `<host>:<path>`
+    #[arg(long)]
+    location: Option<String>,
+    /// Create the workspace even if some dev changes no longer apply: the files they
+    /// are for are left as they are in git
+    #[arg(long)]
+    allow_stale_dev: bool,
+}
+
+/// `<repo>=<number>`, as `--pr` takes it.
+fn repo_and_number(input: &str) -> std::result::Result<(String, u64), String> {
+    let expected = "expected `<repo>=<number>`, e.g. `backend=12`";
+    let (repo, number) = repo_and_value(input).ok_or(expected)?;
+    let number = pull_request_number(number).ok_or(expected)?;
+    Ok((repo.to_string(), number))
+}
+
+/// `<repo>=<branch>`, as `--branch` takes it.
+fn repo_and_branch(input: &str) -> std::result::Result<(String, String), String> {
+    let (repo, branch) =
+        repo_and_value(input).ok_or("expected `<repo>=<branch>`, e.g. `agent=fix/prompt`")?;
+    Ok((repo.to_string(), branch.to_string()))
+}
+
+fn repo_and_value(input: &str) -> Option<(&str, &str)> {
+    input
+        .split_once('=')
+        .filter(|(repo, value)| !repo.is_empty() && !value.is_empty())
+}
+
+/// `12` or `#12`.
+fn pull_request_number(text: &str) -> Option<u64> {
+    text.strip_prefix('#').unwrap_or(text).parse().ok()
 }
 
 #[derive(Subcommand)]
@@ -371,6 +441,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             let name = remove_workspace(&registry, &project_name, &branch, force)?;
             println!("removed workspace `{name}` from {project_name}");
         }
+        Command::Pr(PrCommand::Review(args)) => review(&registry, &resolve_project()?, &args)?,
         Command::Pull { branch } => return pull(&registry, explicit_project, branch.as_deref()),
         Command::Dev(DevCommand::Save {
             repos,
@@ -611,6 +682,160 @@ fn open(
     print_new_workspace(project_name, &workspace_name(request.branch), &workspace);
     println!("{}", workspace.path.display());
     Ok(())
+}
+
+/// What to review in one repo, as asked.
+enum Pick<'a> {
+    PullRequest(u64),
+    Branch(&'a str),
+}
+
+/// A branch to review in one repo, and the pull request it comes from, if any.
+struct Reviewed {
+    repo: String,
+    branch: String,
+    pull_request: Option<u64>,
+}
+
+/// Prints only the path on stdout, like `octok checkout`.
+fn review(registry: &Registry, project_name: &str, args: &ReviewArgs) -> Result<()> {
+    let project = registry.load_project(project_name)?;
+    if project.repos.is_empty() {
+        return Err(Error::NoRepos(project.name));
+    }
+    if let Some(name) = &args.name {
+        // A workspace is named after a branch, so the name must be one.
+        Project::new(&project.name, name)?;
+    }
+    let gh = Gh::new(registry.home().root());
+    let picks = picks_from_flags(&project, args)?;
+    let reviewed = if !picks.is_empty() {
+        picks
+            .into_iter()
+            .map(|(key, pick)| reviewed_pick(&gh, &project, key, &pick))
+            .collect::<Result<_>>()?
+    } else if io::stdin().is_terminal() {
+        reviewed_from_terminal(registry.home(), &project, &gh)?
+    } else {
+        Vec::new()
+    };
+    let Some(branch) = args
+        .name
+        .clone()
+        .or_else(|| review_name(&project, &reviewed))
+    else {
+        return Err(Error::NothingToReview);
+    };
+    let chosen: HashMap<String, String> = reviewed
+        .into_iter()
+        .map(|reviewed| (reviewed.repo, reviewed.branch))
+        .collect();
+    let location = resolve_optional_location(args.location.as_deref())?;
+    let workspace = review_workspace(
+        registry,
+        project_name,
+        &branch,
+        &chosen,
+        location.as_ref(),
+        args.allow_stale_dev,
+    )?;
+    print_new_workspace(project_name, &workspace_name(&branch), &workspace);
+    println!("{}", workspace.path.display());
+    Ok(())
+}
+
+/// What `--pr` and `--branch` ask for, by repo key, in the order of the repos of the
+/// project. Checked before `gh` is called for any of them.
+fn picks_from_flags<'a>(
+    project: &'a Project,
+    args: &'a ReviewArgs,
+) -> Result<Vec<(&'a str, Pick<'a>)>> {
+    let pull_requests = args
+        .pull_requests
+        .iter()
+        .map(|(repo, number)| (repo, Pick::PullRequest(*number)));
+    let branches = args
+        .branches
+        .iter()
+        .map(|(repo, branch)| (repo, Pick::Branch(branch)));
+    let mut picks: HashMap<&str, Pick> = HashMap::new();
+    for (repo, pick) in pull_requests.chain(branches) {
+        let key = project.resolve_repo(repo)?;
+        if picks.insert(key, pick).is_some() {
+            return Err(Error::RepoChosenTwice(key.to_string()));
+        }
+    }
+    let in_project_order = project
+        .repos
+        .keys()
+        .filter_map(|key| picks.remove_entry(key.as_str()))
+        .collect();
+    Ok(in_project_order)
+}
+
+/// Asks, for each repo, which pull request or branch to review. A repo with an empty
+/// answer stays on its base. An answer that cannot be reviewed is asked again.
+fn reviewed_from_terminal(home: &Home, project: &Project, gh: &Gh) -> Result<Vec<Reviewed>> {
+    let mut reviewed = Vec::new();
+    for (key, repo) in &project.repos {
+        let label = repo_label(key, repo.alias.as_deref());
+        let open = gh
+            .open_pull_requests(&repo.url)
+            .inspect_err(|error| eprintln!("cannot list the pull requests of {label}:\n{error}"))
+            .ok();
+        let base = project.effective_base(repo);
+        let answer = ask_what_to_review(&label, base, open.as_deref(), |answer| {
+            let pick = match pull_request_number(answer) {
+                Some(number) => Pick::PullRequest(number),
+                None => Pick::Branch(answer),
+            };
+            let reviewed = reviewed_pick(gh, project, key, &pick)?;
+            check_remote_branch(home, project, key, &reviewed.branch)?;
+            Ok(reviewed)
+        })?;
+        reviewed.extend(answer);
+    }
+    Ok(reviewed)
+}
+
+/// The branch that `pick` means for the repo `key`. Reads a pull request with `gh`.
+fn reviewed_pick(gh: &Gh, project: &Project, key: &str, pick: &Pick) -> Result<Reviewed> {
+    let repo = &project.repos[key];
+    let (branch, pull_request) = match *pick {
+        Pick::Branch(branch) => (branch.to_string(), None),
+        Pick::PullRequest(number) => {
+            let pull_request = gh.pull_request(&repo.url, number)?;
+            if pull_request.from_fork {
+                return Err(Error::ForkPullRequest {
+                    repo: key.to_string(),
+                    number,
+                });
+            }
+            eprintln!(
+                "{}: pull request #{number} is the branch `{}`",
+                repo_label(key, repo.alias.as_deref()),
+                pull_request.head_branch
+            );
+            (pull_request.head_branch, Some(number))
+        }
+    };
+    Ok(Reviewed {
+        repo: key.to_string(),
+        branch,
+        pull_request,
+    })
+}
+
+/// `pr-<repo>-<number>` of the first pull request, else the first branch.
+/// `None` when nothing is reviewed.
+fn review_name(project: &Project, reviewed: &[Reviewed]) -> Option<String> {
+    let of_pull_request = reviewed.iter().find_map(|reviewed| {
+        let number = reviewed.pull_request?;
+        let repo = &project.repos[&reviewed.repo];
+        let repo_name = repo.alias.as_deref().unwrap_or(&reviewed.repo);
+        Some(format!("pr-{repo_name}-{number}"))
+    });
+    of_pull_request.or_else(|| reviewed.first().map(|reviewed| reviewed.branch.clone()))
 }
 
 fn pull(

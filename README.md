@@ -8,6 +8,7 @@ Working on it means creating the same branch in each of them, keeping them up to
 
 - **One command for all repos.** `octok branch feat/login` creates the branch in every repository, starting from a freshly fetched base branch.
 - **A teammate's branch in one command.** `octok checkout feat/login` builds the workspace of a branch that already exists: each repository that has the branch gets it, the others start from their base.
+- **Pull requests side by side.** `octok pr review --pr backend=12` builds a workspace with each repository on the pull request or branch you choose, and the others on their base.
 - **Isolated workspaces.** Each workspace is a set of `git worktree`s, so several features can be open side by side without stashing or switching branches.
 - **No repeated downloads.** Each repository is cloned once into a cache, and every workspace is created from it in an instant.
 - **Plain git underneath.** `octok` calls your own `git`, so your credentials, SSH config and hooks apply, and every checkout is a normal git working tree.
@@ -44,6 +45,7 @@ Requirements:
 - macOS or Linux.
 - `git` 2.37 or newer.
 - `ssh`, only to keep repositories on another machine. See [Locations](#locations---location).
+- `gh`, the GitHub CLI, signed in with `gh auth login`, only for `octok pr review`.
 
 ### From a release
 
@@ -141,6 +143,7 @@ Without a terminal, for example in a script, it refuses instead.
 ### Questions at a terminal
 
 At a terminal, `octok project init` and `octok repo add` ask for each setting that has no flag, and show its default between brackets.
+`octok pr review` asks too, when no flag says what to review: see [Reviewing pull requests](#reviewing-pull-requests-octok-pr-review).
 Press Enter to keep the default.
 An answer that cannot be used is explained and asked again.
 
@@ -229,6 +232,44 @@ created workspace `feat-login` in shop
 - **A branch that is on no remote** is refused: create it with `octok branch <branch>` or `octok checkout -b <branch>`.
 
 `octok branch` refuses a branch that is already on the remote of a repository, so a new name never lands on someone else's work by mistake.
+
+### Reviewing pull requests: `octok pr review`
+
+A change often spans pull requests with different branch names: one in the backend, another in the agent, nothing in the frontend.
+`octok pr review` builds one workspace for all of them, with each repository on what you choose.
+
+| Command | What it does |
+|---|---|
+| `octok pr review [--pr <repo>=<number>]... [--branch <repo>=<branch>]... [--name <name>] [--location <location>] [--allow-stale-dev]` | Creates a workspace with each named repository on the branch of its pull request, or on the given branch, and prints its path. `<repo>` is the key or the alias of a repository. |
+
+```console
+$ cd "$(octok pr review --pr backend=12 --branch agent=fix/prompt)"
+shop-backend (backend): pull request #12 is the branch `feat/login`
+created workspace `pr-backend-12` in shop
+  branch from the remote: shop-backend, shop-agent
+  new branch from the base: shop-frontend
+
+$ octok up
+$ octok rm pr-backend-12
+```
+
+- **A repository with `--pr` or `--branch`** gets a local branch at the commit of the remote one, which follows it: `git pull`, `git push` and `octok pull` work on it.
+  The branch of a pull request is read with `gh`, whatever the state of the pull request.
+- **Any other repository** gets a new branch from its up-to-date base, named after the workspace, so the workspace is complete.
+  If its remote already has a branch with that name, it gets that branch instead.
+- **The name of the workspace** is `pr-<repo>-<number>` for the first pull request, in the order of the repositories of the project, with the alias of the repository when it has one.
+  With only `--branch`, it is the first of those branches, in the same order.
+  `--name` chooses another one.
+  Use that name with the other commands: `octok up --branch pr-backend-12`, `octok pull pr-backend-12`, `octok rm pr-backend-12`.
+- **Without `--pr` and `--branch`, at a terminal,** `octok` lists the open pull requests of each repository, the 15 newest, and asks what to take: a number such as `12` or `#12` for a pull request, a name for a branch, Enter to leave the repository on its base.
+  A branch whose name is only digits needs `--branch`.
+  An answer that cannot be reviewed, such as a branch that is not on the remote, is explained and asked again.
+  Without a terminal, at least one `--pr` or `--branch` is needed.
+- **One workspace for each branch.** git keeps a branch in one checkout at a time, so a branch that another workspace already has is refused, with the folder that holds it.
+- **What a workspace reviews is remembered** in the project file until `octok rm`.
+  Running the command again with the same choices, or `octok checkout <name>`, adds the checkouts the workspace lacks, each on the branch it had.
+  Other choices for a workspace that exists are refused: remove it first, or give `--name`.
+- **Pull requests from forks** are refused: their branch is not in the repository itself.
 
 ### Locations: `--location`
 
@@ -384,14 +425,14 @@ $ grep port main.py                    # the new workspace has them
   Commit your real work before saving: whatever is not committed counts as a dev change.
 - **Changing them.** Edit the files in a checkout and run `octok dev save` again: what is saved follows the checkout.
   Saving from a checkout with no dev changes left removes them.
-- **New workspaces.** `octok branch` and `octok checkout` put the dev changes in every checkout they create.
+- **New workspaces.** `octok branch`, `octok checkout` and `octok pr review` put the dev changes in every checkout they create.
   The workspaces that already exist keep what they have.
 - **Commits.** A tracked file with dev changes can still be edited and committed: the commit holds your edit and not the dev changes, which stay in the file on disk.
   `git status` and `git diff` do not show them: `octok dev show` does.
   The files that git does not track are ignored by git in every checkout.
 - **Lines that clash.** A change to the very lines of a dev change cannot be told apart from it, so git refuses to stage that file and says so.
   If it is a new dev change, run `octok dev save`.
-- **A branch that changed the same lines.** The dev changes of that file can no longer be applied to the commit a checkout starts from, and `octok branch` or `octok checkout` creates nothing and names the file.
+- **A branch that changed the same lines.** The dev changes of that file can no longer be applied to the commit a checkout starts from, and `octok branch`, `octok checkout` or `octok pr review` creates nothing and names the file.
   `--allow-stale-dev` creates the workspace with that file as it is in git: make the dev changes again there, then run `octok dev save`.
 - **Where they are kept.** Under the `octok` home of the machine where the repository lives, in `dev/<project>/<repo>`, so a `.env` never leaves that machine.
   Inside, `dev/changed` holds the tracked files with their dev changes, `dev/new` the files that git does not track, and `base` the tracked files as git had them when they were saved.
@@ -413,7 +454,7 @@ It does not contact the git remotes, and it connects over `ssh` only to the othe
 | Command | What it does |
 |---|---|
 | `make format` | Formats the code. |
-| `make test` | Runs the tests. They need `git` and `gh`. A fake `ssh` stands in for the other machine, so they use no network. |
+| `make test` | Runs the tests. They need `git` and `gh`. A fake `ssh` stands in for the other machine and a fake `gh` for GitHub, so they use no network. |
 | `make build` | Builds the release binary. |
 | `make install` | Installs `octok` into `~/.cargo/bin`. |
 | `make clean-data` | Asks for confirmation, then deletes `~/.octotask` and the folders of its projects on the other machines, unpushed work in the workspaces included. It stops before deleting `~/.octotask` when a machine cannot be reached. |

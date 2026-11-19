@@ -40,6 +40,39 @@ impl Env {
             &bin.join("ssh-add"),
             include_str!("../../octotask-core/tests/fixtures/ssh-add"),
         );
+        install(
+            &bin.join("gh"),
+            include_str!("../../octotask-core/tests/fixtures/gh"),
+        );
+        env
+    }
+
+    /// An open pull request of `repo`, for the fake `gh` of the core tests.
+    fn pull_request(&self, repo: &str, number: u64, branch: &str, from_fork: bool) {
+        let pull_request = serde_json::json!({
+            "number": number,
+            "title": format!("Change {number}"),
+            "headRefName": branch,
+            "author": {"login": "alice"},
+            "isCrossRepository": from_fork,
+        });
+        self.gh_file(repo, &format!("{number}.json"), &pull_request.to_string());
+    }
+
+    /// A file of the fake `gh` for `repo`: a pull request, or the `error` it fails with.
+    fn gh_file(&self, repo: &str, name: &str, content: &str) {
+        let dir = self.machine_file("pull requests").join(repo);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(name), content).unwrap();
+    }
+
+    /// A project whose backend has the pull request 12 for `feat/login` and whose agent
+    /// has the branch `fix/prompt`. The frontend has neither.
+    fn with_a_pull_request() -> Self {
+        let env = Self::with_repos(&["frontend", "backend", "agent"]);
+        commit_on_new_branch(&env.remote_dir("backend"), "feat/login", COMMIT_DATE);
+        commit_on_new_branch(&env.remote_dir("agent"), "fix/prompt", COMMIT_DATE);
+        env.pull_request("backend", 12, "feat/login", false);
         env
     }
 
@@ -130,6 +163,7 @@ impl Env {
             .env("FAKE_SSH_LOG", self.machine_file("ssh.log"))
             .env("FAKE_SSH_CONFIG", self.machine_file("ssh.config"))
             .env("FAKE_SSH_ADD_LOG", self.machine_file("ssh-add.log"))
+            .env("FAKE_GH_DIR", self.machine_file("pull requests"))
             .args(args);
         cmd
     }
@@ -2619,4 +2653,385 @@ fn dev_show_json_lists_the_saved_files_and_the_diff_of_each_repo() {
     let diff = backend["diff"].as_str().unwrap();
     assert!(diff.contains("-run(port=8000)\n+run(port=9005)"), "{diff}");
     assert!(!shown.to_string().contains("secret"), "{shown}");
+}
+
+fn current_branch(checkout: &Path) -> String {
+    git(checkout, &["branch", "--show-current"])
+}
+
+#[test]
+fn pr_review_puts_each_repo_on_its_pull_request_or_branch_and_the_others_on_the_base() {
+    let env = Env::with_a_pull_request();
+    let path = env.workspace_dir("pr-backend-12");
+
+    env.octok(&[
+        "pr",
+        "review",
+        "--branch",
+        "agent=fix/prompt",
+        "--pr",
+        "backend=12",
+    ])
+    .assert()
+    .success()
+    .stdout(format!("{}\n", path.display()))
+    .stderr(
+        "backend: pull request #12 is the branch `feat/login`\n\
+         created workspace `pr-backend-12` in deeptree\n  \
+         branch from the remote: backend, agent\n  \
+         new branch from the base: frontend\n",
+    );
+
+    assert_eq!(current_branch(&path.join("backend")), "feat/login");
+    assert_eq!(current_branch(&path.join("agent")), "fix/prompt");
+    assert_eq!(current_branch(&path.join("frontend")), "pr-backend-12");
+    assert_eq!(
+        git(&path.join("backend"), &["rev-parse", "HEAD"]),
+        git(&env.remote_dir("backend"), &["rev-parse", "feat/login"])
+    );
+    env.octok(&["pull", "pr-backend-12"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("backend   up to date"));
+    env.octok(&["rm", "pr-backend-12"]).assert().success();
+    assert!(!path.exists());
+}
+
+#[test]
+fn pr_review_names_the_workspace_after_the_pull_request_the_branch_or_the_given_name() {
+    let env = Env::with_a_pull_request();
+    env.octok(&["repo", "set", "backend", "--alias", "api"])
+        .assert()
+        .success();
+    let path = |name: &str| format!("{}\n", env.workspace_dir(name).display());
+
+    assert_eq!(
+        env.stdout(&["pr", "review", "--pr", "api=#12"]),
+        path("pr-api-12")
+    );
+    env.octok(&["rm", "pr-api-12"]).assert().success();
+    assert_eq!(
+        env.stdout(&["pr", "review", "--branch", "agent=fix/prompt"]),
+        path("fix-prompt")
+    );
+    assert_eq!(
+        env.stdout(&[
+            "pr",
+            "review",
+            "--pr",
+            "backend=12",
+            "--name",
+            "review/login"
+        ]),
+        path("review-login")
+    );
+
+    let named = env.workspace_dir("review-login");
+    assert_eq!(current_branch(&named.join("backend")), "feat/login");
+    assert_eq!(current_branch(&named.join("frontend")), "review/login");
+    assert_eq!(
+        current_branch(&env.workspace_dir("fix-prompt").join("frontend")),
+        "fix/prompt"
+    );
+}
+
+#[test]
+fn pr_review_refuses_what_it_cannot_review_and_creates_nothing() {
+    let env = Env::with_a_pull_request();
+    env.pull_request("backend", 13, "patch-1", true);
+    let refused = |args: &[&str], message: &str| {
+        env.octok(args)
+            .assert()
+            .code(1)
+            .stdout("")
+            .stderr(predicate::str::contains(message));
+    };
+
+    refused(
+        &["pr", "review"],
+        "error: nothing to review: choose a pull request or a branch for at least one repo",
+    );
+    refused(
+        &["pr", "review", "--pr", "backend=13"],
+        "error: pull request #13 of `backend` comes from a fork",
+    );
+    refused(
+        &["pr", "review", "--pr", "backend=99"],
+        "Could not resolve to a PullRequest with the number of 99",
+    );
+    refused(
+        &[
+            "pr",
+            "review",
+            "--pr",
+            "backend=12",
+            "--branch",
+            "backend=x",
+        ],
+        "error: repo `backend` is given more than once",
+    );
+    refused(
+        &["pr", "review", "--pr", "billing=12"],
+        "error: repo `billing` is not registered",
+    );
+    refused(
+        &["pr", "review", "--branch", "frontend=feat/login"],
+        "error: repo `frontend` has no branch `feat/login` on its remote",
+    );
+    let misuse = |args: &[&str], message: &str| {
+        env.octok(args)
+            .assert()
+            .code(2)
+            .stderr(predicate::str::contains(message));
+    };
+    let number = "expected `<repo>=<number>`, e.g. `backend=12`";
+    misuse(&["pr", "review", "--pr", "backend"], number);
+    misuse(&["pr", "review", "--pr", "backend=twelve"], number);
+    misuse(
+        &["pr", "review", "--branch", "agent="],
+        "expected `<repo>=<branch>`, e.g. `agent=fix/prompt`",
+    );
+
+    assert!(!env.dir.path().join("workspaces").exists());
+}
+
+#[test]
+fn pr_review_checks_every_flag_before_it_asks_gh_anything() {
+    let env = Env::with_a_pull_request();
+
+    env.octok(&["pr", "review", "--pr", "backend=12", "--branch", "nope=x"])
+        .assert()
+        .code(1)
+        .stderr("error: repo `nope` is not registered\n");
+}
+
+#[test]
+fn pr_review_remembers_what_a_workspace_reviews() {
+    let env = Env::with_a_pull_request();
+    env.pull_request("agent", 7, "fix/prompt", false);
+    let path = env.workspace_dir("pr-backend-12");
+    env.octok(&["pr", "review", "--pr", "backend=12"])
+        .assert()
+        .success();
+    let project_file = env.read("projects/deeptree.yaml");
+    assert!(
+        project_file.contains(
+            "workspaces:\n  pr-backend-12:\n    branch: pr-backend-12\n    repos:\n      \
+             backend:\n        branch: feat/login\n"
+        ),
+        "{project_file}"
+    );
+
+    env.octok(&[
+        "pr",
+        "review",
+        "--pr",
+        "backend=12",
+        "--pr",
+        "agent=7",
+        "--name",
+        "pr-backend-12",
+    ])
+    .assert()
+    .code(1)
+    .stdout("")
+    .stderr(predicate::str::contains(
+        "error: workspace `pr-backend-12` already reviews other branches: backend=feat/login\n\
+         remove it with `octok rm pr-backend-12`, or choose another name with `--name`\n",
+    ));
+    assert_eq!(current_branch(&path.join("agent")), "pr-backend-12");
+
+    // Any command that completes the workspace puts back the branch it reviews.
+    fs::remove_dir_all(path.join("backend")).unwrap();
+    env.octok(&["status"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "backend   no worktree: add it with `octok checkout pr-backend-12`\n",
+        ));
+    env.octok(&["checkout", "pr-backend-12"])
+        .assert()
+        .success()
+        .stderr(
+            "completed workspace `pr-backend-12` in deeptree\n  \
+             branch restored from the cache: backend\n",
+        );
+    assert_eq!(current_branch(&path.join("backend")), "feat/login");
+
+    env.octok(&["rm", "pr-backend-12"]).assert().success();
+    assert!(!env.read("projects/deeptree.yaml").contains("workspaces"));
+}
+
+#[test]
+fn pr_review_refuses_a_branch_that_another_workspace_has() {
+    let env = Env::with_a_pull_request();
+    let own = env.workspace_dir("feat-login");
+    env.octok(&["checkout", "feat/login"]).assert().success();
+
+    env.octok(&["pr", "review", "--pr", "backend=12"])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains(format!(
+            "error: branch `feat/login` of `backend` is already checked out in {}",
+            // git names the folder by its real path.
+            own.join("backend").canonicalize().unwrap().display()
+        )));
+
+    assert!(!env.workspace_dir("pr-backend-12").exists());
+}
+
+#[test]
+fn pr_review_at_a_terminal_asks_what_to_take_for_each_repo() {
+    let env = Env::with_a_pull_request();
+    env.pull_request("backend", 13, "patch-1", true);
+
+    let mut terminal = env.terminal(&["pr", "review"]);
+    answer(
+        &mut terminal,
+        "No open pull requests of frontend.\r\n\
+         Pull request or branch of frontend [none, base `main`]: ",
+        "",
+    );
+    terminal
+        .exp_string(
+            "Open pull requests of backend:\r\n  \
+             #12  Change 12  (feat/login, alice)\r\n  \
+             #13  Change 13  (patch-1, alice, from a fork)\r\n",
+        )
+        .unwrap();
+    let backend = "Pull request or branch of backend [none, base `main`]: ";
+    answer(&mut terminal, backend, "13");
+    terminal
+        .exp_string("pull request #13 of `backend` comes from a fork")
+        .unwrap();
+    answer(&mut terminal, backend, "#12");
+    let agent = "Pull request or branch of agent [none, base `main`]: ";
+    answer(&mut terminal, agent, "fix/nope");
+    terminal
+        .exp_string("repo `agent` has no branch `fix/nope` on its remote")
+        .unwrap();
+    answer(&mut terminal, agent, "fix/prompt");
+    let printed = finish(terminal);
+
+    assert!(
+        printed.contains("created workspace `pr-backend-12` in deeptree"),
+        "{printed}"
+    );
+    let path = env.workspace_dir("pr-backend-12");
+    assert_eq!(current_branch(&path.join("frontend")), "pr-backend-12");
+    assert_eq!(current_branch(&path.join("backend")), "feat/login");
+    assert_eq!(current_branch(&path.join("agent")), "fix/prompt");
+}
+
+#[test]
+fn pr_review_at_a_terminal_with_nothing_chosen_creates_nothing() {
+    let env = Env::with_repos(&["frontend"]);
+
+    let mut terminal = env.terminal(&["pr", "review"]);
+    answer(
+        &mut terminal,
+        "Pull request or branch of frontend [none, base `main`]: ",
+        "",
+    );
+    terminal.exp_string("error: nothing to review").unwrap();
+    terminal.exp_eof().unwrap();
+
+    assert!(!env.dir.path().join("workspaces").exists());
+}
+
+#[test]
+fn pr_review_lists_pull_requests_in_one_readable_line_each() {
+    let env = Env::with_repos(&["backend"]);
+    let long_title = "Rework the whole login flow ".repeat(5);
+    for (number, title, author) in [
+        (
+            7,
+            "Fix\u{1b}[31m the\r\ncolours",
+            serde_json::json!({"login": "bob"}),
+        ),
+        (120, long_title.as_str(), serde_json::Value::Null),
+    ] {
+        let pull_request = serde_json::json!({
+            "number": number,
+            "title": title,
+            "headRefName": "feat/x",
+            "author": author,
+            "isCrossRepository": false,
+        });
+        env.gh_file(
+            "backend",
+            &format!("{number}.json"),
+            &pull_request.to_string(),
+        );
+    }
+
+    let mut terminal = env.terminal(&["pr", "review"]);
+    terminal
+        .exp_string(
+            "Open pull requests of backend:\r\n  \
+             #120  Rework the whole login flow Rework the whole login flow Rework the wh...  \
+             (feat/x)\r\n  \
+             #7    Fix [31m the  colours  (feat/x, bob)\r\n",
+        )
+        .unwrap();
+    answer(
+        &mut terminal,
+        "Pull request or branch of backend [none, base `main`]: ",
+        "",
+    );
+    terminal.exp_eof().unwrap();
+}
+
+#[test]
+fn pr_review_still_asks_for_a_repo_whose_pull_requests_cannot_be_listed() {
+    let env = Env::with_a_pull_request();
+    env.gh_file("frontend", "error", "error connecting to api.github.com\n");
+
+    let mut terminal = env.terminal(&["pr", "review"]);
+    terminal
+        .exp_string("cannot list the pull requests of frontend:")
+        .unwrap();
+    terminal
+        .exp_string("error connecting to api.github.com")
+        .unwrap();
+    let asked = terminal
+        .exp_string("Pull request or branch of frontend [none, base `main`]: ")
+        .unwrap();
+    assert!(!asked.contains("No open pull requests"), "{asked}");
+    terminal.send_line("").unwrap();
+    answer(
+        &mut terminal,
+        "Pull request or branch of backend [none, base `main`]: ",
+        "12",
+    );
+    answer(
+        &mut terminal,
+        "Pull request or branch of agent [none, base `main`]: ",
+        "",
+    );
+    let printed = finish(terminal);
+
+    assert!(
+        printed.contains("created workspace `pr-backend-12` in deeptree"),
+        "{printed}"
+    );
+}
+
+#[test]
+fn pr_review_stops_before_any_question_when_it_cannot_succeed() {
+    let empty = Env::with_repos(&[]);
+    let env = Env::with_a_pull_request();
+
+    let mut terminal = empty.terminal(&["pr", "review"]);
+    terminal
+        .exp_string("error: project `deeptree` has no repos")
+        .unwrap();
+    terminal.exp_eof().unwrap();
+    let mut terminal = env.terminal(&["pr", "review", "--name", "my review"]);
+    terminal
+        .exp_string("error: invalid branch `my review`")
+        .unwrap();
+    let rest = terminal.exp_eof().unwrap();
+
+    assert!(!rest.contains("Pull request or branch"), "{rest}");
 }

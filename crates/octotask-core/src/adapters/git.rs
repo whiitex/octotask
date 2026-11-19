@@ -192,6 +192,22 @@ impl Git {
             .map(drop)
     }
 
+    /// The worktree that has `branch` checked out, if any. A worktree whose directory is
+    /// gone does not count: `prune_worktrees` frees its branch.
+    pub fn worktree_of_branch(&self, branch: &str) -> Result<Option<PathBuf>> {
+        let listed = self.run(&["worktree", "list", "--porcelain"])?;
+        let checked_out = format!("branch refs/heads/{branch}");
+        let worktree = listed.split("\n\n").find_map(|worktree| {
+            let mut lines = worktree.lines();
+            let path = lines.next()?.strip_prefix("worktree ")?;
+            let rest: Vec<&str> = lines.collect();
+            let holds_it = rest.contains(&checked_out.as_str());
+            let gone = rest.iter().any(|line| line.starts_with("prunable"));
+            (holds_it && !gone).then(|| PathBuf::from(path))
+        });
+        Ok(worktree)
+    }
+
     /// Forgets the worktrees whose directory is gone, freeing their branches.
     pub fn prune_worktrees(&self) -> Result<()> {
         self.run(&["worktree", "prune"]).map(drop)

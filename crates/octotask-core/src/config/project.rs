@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
@@ -50,6 +52,10 @@ pub struct WorkspaceSettings {
     /// Where every repo of the workspace lives, whatever the repos and the project say.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub location: Option<Location>,
+    /// The branch of the workspace, saved when it reviews branches: some of its repos
+    /// then have another one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
     /// Settings of single repos in this workspace, by repo key.
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub repos: IndexMap<String, WorkspaceRepo>,
@@ -61,11 +67,19 @@ pub struct WorkspaceRepo {
     /// Shell command that starts the repo in this workspace, instead of the repo's own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run: Option<String>,
+    /// The branch the repo has in this workspace, instead of the branch of the workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
 }
 
 impl WorkspaceSettings {
     fn is_empty(&self) -> bool {
-        self.location.is_none() && self.repos.is_empty()
+        self.location.is_none() && self.branch.is_none() && self.repos.is_empty()
+    }
+
+    fn drop_repos_without_settings(&mut self) {
+        self.repos
+            .retain(|_, repo| repo.run.is_some() || repo.branch.is_some());
     }
 }
 
@@ -232,12 +246,69 @@ impl Project {
             }
             None => {
                 if let Some(settings) = self.workspaces.get_mut(workspace) {
-                    settings.repos.shift_remove(key);
+                    if let Some(repo) = settings.repos.get_mut(key) {
+                        repo.run = None;
+                    }
+                    settings.drop_repos_without_settings();
                 }
                 self.drop_workspace_without_settings(workspace);
             }
         }
         Ok(())
+    }
+
+    /// Saves what one workspace reviews: `branch` is its own, and `reviewed` has the
+    /// branch of each repo that reviews another one, by repo key.
+    pub fn set_review(
+        &mut self,
+        workspace: &str,
+        branch: &str,
+        reviewed: &HashMap<String, String>,
+    ) -> Result<()> {
+        validate_workspace_name(workspace)?;
+        validate_branch(branch)?;
+        for (key, reviewed_branch) in reviewed {
+            if !self.repos.contains_key(key) {
+                return Err(Error::RepoNotFound(key.clone()));
+            }
+            validate_branch(reviewed_branch)?;
+        }
+        let in_project_order: Vec<(String, String)> = self
+            .repos
+            .keys()
+            .filter_map(|key| Some((key.clone(), reviewed.get(key)?.clone())))
+            .collect();
+        let settings = self.workspaces.entry(workspace.to_string()).or_default();
+        settings.branch = Some(branch.to_string());
+        for (key, reviewed_branch) in in_project_order {
+            settings.repos.entry(key).or_default().branch = Some(reviewed_branch);
+        }
+        Ok(())
+    }
+
+    /// What one workspace reviews, if it was saved: its own branch, and the branch of
+    /// each repo that reviews another one, by repo key.
+    pub fn review(&self, workspace: &str) -> Option<(&str, HashMap<String, String>)> {
+        let settings = self.workspaces.get(workspace)?;
+        let branch = settings.branch.as_deref()?;
+        let reviewed = settings
+            .repos
+            .iter()
+            .filter_map(|(key, repo)| Some((key.clone(), repo.branch.clone()?)))
+            .collect();
+        Some((branch, reviewed))
+    }
+
+    /// Forgets what one workspace reviews.
+    pub fn clear_review(&mut self, workspace: &str) {
+        if let Some(settings) = self.workspaces.get_mut(workspace) {
+            settings.branch = None;
+            for repo in settings.repos.values_mut() {
+                repo.branch = None;
+            }
+            settings.drop_repos_without_settings();
+        }
+        self.drop_workspace_without_settings(workspace);
     }
 
     /// Forgets every setting one workspace has of its own.
@@ -327,11 +398,17 @@ impl Project {
             if let Some(location) = &settings.location {
                 location.validate()?;
             }
+            if let Some(branch) = &settings.branch {
+                validate_branch(branch)?;
+            }
             for (key, repo) in &settings.repos {
                 if !self.repos.contains_key(key) {
                     return Err(Error::RepoNotFound(key.clone()));
                 }
                 checked_command("run command", repo.run.as_deref())?;
+                if let Some(branch) = &repo.branch {
+                    validate_branch(branch)?;
+                }
             }
         }
         for (key, repo) in &self.repos {

@@ -4,7 +4,7 @@
 use std::io;
 
 use octotask_core::{
-    Location, OriginBranches, Project, Result, Ssh, resolve_location, ssh_config_hosts,
+    Location, OriginBranches, Project, PullRequest, Result, Ssh, resolve_location, ssh_config_hosts,
 };
 
 use crate::utils::ask;
@@ -14,6 +14,14 @@ pub(crate) const DEFAULT_BASE: &str = "staging";
 
 /// How many machines are listed before the location is asked.
 const LISTED_MACHINES: usize = 15;
+
+/// How many open pull requests of a repo are listed before the choice is asked.
+const LISTED_PULL_REQUESTS: usize = 15;
+
+/// How much of the title of a pull request is listed.
+const LISTED_TITLE_LENGTH: usize = 72;
+
+const ELLIPSIS: &str = "...";
 
 /// How many branches are listed after the default one and the staging ones.
 const LISTED_OTHER_BRANCHES: usize = 5;
@@ -95,6 +103,76 @@ pub(crate) fn ask_location(default: &str) -> Result<Option<Location>> {
         }
         Ok(location)
     })
+}
+
+/// Asks which pull request or branch of the repo shown as `repo` to review, after listing
+/// its `open` pull requests: `None` when they could not be read. An empty answer reviews
+/// nothing there, and the repo stays on its `base`.
+pub(crate) fn ask_what_to_review<T>(
+    repo: &str,
+    base: &str,
+    open: Option<&[PullRequest]>,
+    accept: impl FnMut(&str) -> Result<T>,
+) -> Result<Option<T>> {
+    match open {
+        Some([]) => eprintln!("No open pull requests of {repo}."),
+        Some(open) => print_pull_requests(repo, open),
+        None => {}
+    }
+    ask_until(
+        &format!("Pull request or branch of {repo}"),
+        &format!("none, base `{base}`"),
+        accept,
+    )
+}
+
+fn print_pull_requests(repo: &str, open: &[PullRequest]) {
+    let listed = &open[..open.len().min(LISTED_PULL_REQUESTS)];
+    let number_width = listed
+        .iter()
+        .map(|pull_request| pull_request.number.to_string().len())
+        .max()
+        .unwrap_or(0);
+    let lines: Vec<String> = listed
+        .iter()
+        .map(|pull_request| pull_request_line(pull_request, number_width))
+        .collect();
+    print_list(
+        &format!("Open pull requests of {repo}:"),
+        &lines,
+        open.len() - listed.len(),
+    );
+}
+
+/// One line for a pull request. Its title comes from GitHub, so it is cut to a readable
+/// length and cannot move the cursor or colour the terminal.
+fn pull_request_line(pull_request: &PullRequest, number_width: usize) -> String {
+    let PullRequest {
+        number,
+        title,
+        head_branch,
+        author,
+        from_fork,
+    } = pull_request;
+    let plain = |text: &str| -> String {
+        let visible = |c: char| if c.is_control() { ' ' } else { c };
+        text.chars().map(visible).collect()
+    };
+    let mut title = plain(title);
+    if title.chars().count() > LISTED_TITLE_LENGTH {
+        let kept = LISTED_TITLE_LENGTH - ELLIPSIS.len();
+        title = title.chars().take(kept).chain(ELLIPSIS.chars()).collect();
+    }
+    let mut details = vec![plain(head_branch)];
+    if !author.is_empty() {
+        details.push(plain(author));
+    }
+    if *from_fork {
+        details.push("from a fork".to_string());
+    }
+    let number = format!("#{number}");
+    let width = number_width + 1;
+    format!("{number:width$}  {title}  ({})", details.join(", "))
 }
 
 /// The key is shown as the default alias, and answering it saves no alias:
