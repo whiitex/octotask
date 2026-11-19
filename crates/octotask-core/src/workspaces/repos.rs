@@ -1,8 +1,40 @@
+use serde::Serialize;
+use serde::ser::{SerializeMap, Serializer};
+
 use super::cache::Cache;
 use super::dev::Store;
 use super::workspace::{workspace_name, workspaces_with_repo};
 use crate::config::validate_branch;
 use crate::{Error, Home, Location, OriginBranches, Project, Registry, Result};
+
+/// What a command that goes through the repos one by one did for one of them.
+/// A failing repo does not stop the others, so each one has its own result.
+#[derive(Debug)]
+pub struct RepoResult<T> {
+    pub key: String,
+    pub result: Result<T>,
+}
+
+/// `{"key", "outcome"}` for a repo that went well, `{"key", "error"}` for one that failed.
+impl<T: Serialize> Serialize for RepoResult<T> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(Some(2))?;
+        map.serialize_entry("key", &self.key)?;
+        match &self.result {
+            Ok(outcome) => map.serialize_entry("outcome", outcome)?,
+            Err(error) => map.serialize_entry("error", error)?,
+        }
+        map.end()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FetchOutcome {
+    /// The repo was not in the cache yet.
+    Cloned,
+    Fetched,
+}
 
 /// What `octok repo add` asks for. `key` defaults to the last path segment of the url,
 /// `base` and `location` to the project's.
@@ -167,15 +199,20 @@ pub fn unregister_repo(registry: &Registry, project_name: &str, name: &str) -> R
 
 /// Fetches every repo of the project, cloning the missing caches.
 /// A failing repo does not stop the others: each one gets its own result.
-pub fn fetch_repos(home: &Home, project: &Project) -> Vec<(String, Result<()>)> {
+pub fn fetch_repos(home: &Home, project: &Project) -> Vec<RepoResult<FetchOutcome>> {
     project
         .repos
         .iter()
         .map(|(key, repo)| {
-            let result = Cache::of_repo(home, project, key, repo)
-                .fetch(&repo.url)
-                .map(drop);
-            (key.clone(), result)
+            let cloned = Cache::of_repo(home, project, key, repo).fetch(&repo.url);
+            let outcome = |cloned| match cloned {
+                true => FetchOutcome::Cloned,
+                false => FetchOutcome::Fetched,
+            };
+            RepoResult {
+                key: key.clone(),
+                result: cloned.map(outcome),
+            }
         })
         .collect()
 }

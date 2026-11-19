@@ -178,6 +178,16 @@ impl Env {
         serde_json::from_slice(&out.stdout).unwrap()
     }
 
+    /// The exit code of `octok`, and the one JSON document it must print on stdout.
+    fn document(&self, args: &[&str]) -> (Option<i32>, serde_json::Value) {
+        let out = self.octok(args).output().unwrap();
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        assert_eq!(stdout.lines().count(), 1, "one document: {stdout:?}");
+        let document =
+            serde_json::from_str(&stdout).unwrap_or_else(|error| panic!("{error}: {stdout:?}"));
+        (out.status.code(), document)
+    }
+
     fn read(&self, relative_path: &str) -> String {
         fs::read_to_string(self.dir.path().join(relative_path)).unwrap()
     }
@@ -233,6 +243,12 @@ const TERMINAL_TIMEOUT_MS: u64 = 20_000;
 fn answer(terminal: &mut PtySession, question: &str, line: &str) {
     terminal.exp_string(question).unwrap();
     terminal.send_line(line).unwrap();
+}
+
+/// The JSON document that ends what a terminal shows: git writes its progress before it.
+fn last_document(printed: &str) -> serde_json::Value {
+    let line = printed.lines().last().unwrap_or_default();
+    serde_json::from_str(line).unwrap_or_else(|error| panic!("{error}: {printed:?}"))
 }
 
 /// Waits for `octok` to end well and returns what it still printed.
@@ -445,11 +461,11 @@ fn project_rm_of_the_default_leaves_no_default() {
 
     env.octok(&["repo", "ls"])
         .assert()
-        .code(1)
+        .code(2)
         .stderr(predicate::str::contains("default project"));
     env.octok(&["project", "rm", "side"])
         .assert()
-        .code(1)
+        .code(3)
         .stderr(predicate::str::contains("project `side` not found"));
 }
 
@@ -546,7 +562,7 @@ fn repo_rm_removes_from_file() {
 
     env.octok(&["repo", "rm", "frontend"])
         .assert()
-        .code(1)
+        .code(3)
         .stderr(predicate::str::contains("frontend"));
     assert_eq!(env.read("projects/deeptree.yaml"), after_rm);
 }
@@ -603,7 +619,7 @@ fn repo_add_without_name_asks_for_one_when_no_key_can_be_derived() {
 
     env.octok(&["repo", "add", &env.remote(".github")])
         .assert()
-        .code(1)
+        .code(2)
         .stderr(predicate::str::contains("--name"))
         .stderr(predicate::str::contains("invalid git url").not());
 
@@ -628,11 +644,11 @@ fn newer_global_config_is_rejected_and_left_untouched() {
 }
 
 #[test]
-fn errors_exit_1_with_message_and_change_nothing() {
+fn errors_exit_with_a_message_and_change_nothing() {
     let env = Env::new();
     env.octok(&["repo", "add", &env.remote("frontend")])
         .assert()
-        .code(1)
+        .code(2)
         .stderr(predicate::str::contains("default project"));
 
     env.octok(&["project", "init", "deeptree", "--base", "main"])
@@ -640,14 +656,14 @@ fn errors_exit_1_with_message_and_change_nothing() {
         .success();
     env.octok(&["repo", "add", "not-a-url"])
         .assert()
-        .code(1)
+        .code(2)
         .stderr(predicate::str::contains("not-a-url"));
     env.octok(&["repo", "add", &env.remote("frontend")])
         .assert()
         .success();
     env.octok(&["repo", "add", &env.remote("other/frontend")])
         .assert()
-        .code(1);
+        .code(5);
 
     let ls = env.json(&["repo", "ls", "--json"]);
     assert_eq!(ls["repos"].as_array().unwrap().len(), 1);
@@ -687,12 +703,12 @@ fn repo_rm_is_refused_while_a_workspace_uses_the_repo() {
 
     env.octok(&["repo", "rm", "frontend"])
         .assert()
-        .code(1)
+        .code(5)
         .stderr(predicate::str::contains("feat-login"));
 }
 
 #[test]
-fn fetch_reports_every_repo_and_exits_1_when_one_fails() {
+fn fetch_reports_every_repo_and_exits_6_when_one_fails() {
     let env = Env::with_repos(&["frontend", "backend"]);
     commit(&env.remote_dir("backend"), "second");
 
@@ -709,7 +725,7 @@ fn fetch_reports_every_repo_and_exits_1_when_one_fails() {
     fs::remove_dir_all(env.remote_dir("frontend")).unwrap();
     env.octok(&["fetch"])
         .assert()
-        .code(1)
+        .code(6)
         .stdout("frontend  failed\nbackend   fetched\n")
         .stderr(predicate::str::starts_with("error: frontend: "));
 }
@@ -740,7 +756,7 @@ fn checkout_b_creates_and_plain_checkout_prints_the_path() {
 
     env.octok(&["checkout", "feat/login"])
         .assert()
-        .code(1)
+        .code(3)
         .stdout("")
         .stderr(predicate::str::contains("octok checkout -b feat/login"));
 
@@ -795,7 +811,7 @@ fn checkout_of_a_branch_that_is_on_no_remote_is_refused_with_a_hint() {
 
     env.octok(&["checkout", "feat/nope"])
         .assert()
-        .code(1)
+        .code(3)
         .stdout("")
         .stderr(
             "error: no repo has a branch `feat/nope` on its remote: \
@@ -853,7 +869,7 @@ fn branch_that_already_exists_is_refused_with_a_hint() {
 
     env.octok(&["branch", "feat/login"])
         .assert()
-        .code(1)
+        .code(5)
         .stdout("")
         .stderr(
             "error: branch `feat/login` already exists on the remote of: backend\n\
@@ -904,7 +920,7 @@ fn pull_takes_a_branch_and_needs_one_outside_a_workspace() {
     env.octok(&["pull"])
         .current_dir(env.dir.path())
         .assert()
-        .code(1)
+        .code(2)
         .stderr(predicate::str::contains("octok pull <branch>"));
 }
 
@@ -1028,7 +1044,7 @@ fn duplicate_repo_names_and_aliases_are_explained() {
 
     env.octok(&["repo", "add", &env.remote("fork/DeepTreeDashboard")])
         .assert()
-        .code(1)
+        .code(5)
         .stderr(format!(
             "error: repo `DeepTreeDashboard` is already registered ({first})\n\
              choose another name with `--name <key>`\n"
@@ -1043,7 +1059,7 @@ fn duplicate_repo_names_and_aliases_are_explained() {
         "frontend",
     ])
     .assert()
-    .code(1)
+    .code(5)
     .stderr("error: alias `frontend` is already used by repo `DeepTreeDashboard`\n");
 
     env.octok(&[
@@ -1112,7 +1128,7 @@ fn repo_add_without_a_terminal_refuses_a_base_missing_on_the_remote() {
 
     env.octok(&["repo", "add", &env.remote("frontend"), "--base", "nope"])
         .assert()
-        .code(1)
+        .code(3)
         .stderr("error: repo `frontend` has no branch `nope` on its remote\n");
 
     assert_eq!(
@@ -1159,7 +1175,7 @@ fn branch_on_an_existing_workspace_adds_the_repos_that_joined_later() {
         );
     env.octok(&["branch", "feat/login"])
         .assert()
-        .code(1)
+        .code(5)
         .stderr(predicate::str::contains("already exists"));
 
     fs::remove_dir_all(path.join("frontend")).unwrap();
@@ -1180,7 +1196,7 @@ fn rm_deletes_a_workspace_unless_it_holds_unsaved_work() {
     fs::write(path.join("frontend/draft.txt"), "wip").unwrap();
     commit(&path.join("backend"), "local work");
 
-    env.octok(&["rm", "feat/login"]).assert().code(1).stderr(
+    env.octok(&["rm", "feat/login"]).assert().code(4).stderr(
         "error: workspace `feat-login` has work that would be lost:\n\
          \x20 frontend: uncommitted changes\n\
          \x20 backend: 1 unpushed commit on `feat/login`\n\
@@ -1195,7 +1211,7 @@ fn rm_deletes_a_workspace_unless_it_holds_unsaved_work() {
     assert!(!path.exists());
     env.octok(&["rm", "feat/login"])
         .assert()
-        .code(1)
+        .code(3)
         .stderr(predicate::str::contains("no workspace for `feat/login`"));
     env.octok(&["branch", "feat/login"]).assert().success();
 }
@@ -1207,7 +1223,7 @@ fn project_rm_is_refused_with_workspaces_and_then_deletes_the_caches() {
 
     env.octok(&["project", "rm", "deeptree"])
         .assert()
-        .code(1)
+        .code(5)
         .stderr(
             "error: project `deeptree` still has workspaces: feat-login\n\
              remove them first with `octok rm <branch>`\n",
@@ -1300,11 +1316,11 @@ fn repo_set_rejects_missing_or_contradictory_options_and_unknown_bases() {
         .code(2);
     env.octok(&["repo", "set", "frontend", "--base", "nope"])
         .assert()
-        .code(1)
+        .code(3)
         .stderr("error: repo `frontend` has no branch `nope` on its remote\n");
     env.octok(&["repo", "set", "missing", "--alias", "web"])
         .assert()
-        .code(1)
+        .code(3)
         .stderr("error: repo `missing` is not registered\n");
     assert_eq!(
         env.stdout(&["repo", "ls"]),
@@ -1399,7 +1415,7 @@ fn a_machine_that_cannot_be_reached_registers_nothing() {
         "unreachable",
     ])
     .assert()
-    .code(1)
+    .code(7)
     .stderr(predicate::str::contains(
         "cannot run commands on `unreachable` over ssh",
     ))
@@ -1482,7 +1498,7 @@ fn pull_and_rm_reach_the_worktrees_on_the_other_machine() {
     fs::write(remote.join("notes.txt"), "unsaved").unwrap();
     env.octok(&["rm", "feat/login"])
         .assert()
-        .code(1)
+        .code(4)
         .stderr(predicate::str::contains("backend: uncommitted changes"));
     assert!(remote.is_dir());
 
@@ -1497,7 +1513,7 @@ fn pull_and_rm_reach_the_worktrees_on_the_other_machine() {
         ),
         ""
     );
-    env.octok(&["pull", "feat/login"]).assert().code(1);
+    env.octok(&["pull", "feat/login"]).assert().code(3);
 }
 
 #[test]
@@ -1509,7 +1525,7 @@ fn a_repo_changes_machine_only_while_no_workspace_uses_it() {
 
     env.octok(&["repo", "set", "backend", "--location", "vm"])
         .assert()
-        .code(1)
+        .code(5)
         .stderr(predicate::str::contains(
             "repo `backend` is used by workspaces: feat-login",
         ));
@@ -1555,7 +1571,7 @@ fn project_set_location_moves_the_repos_that_follow_the_project() {
 
     env.octok(&["project", "set", "--location", "vm"])
         .assert()
-        .code(1)
+        .code(5)
         .stderr(predicate::str::contains("still has workspaces: feat-login"));
 
     env.octok(&["rm", "feat/login"]).assert().success();
@@ -1728,7 +1744,7 @@ fn a_workspace_can_live_whole_on_one_machine() {
 
     env.octok(&["branch", "feat/here", "--location", "vm"])
         .assert()
-        .code(1)
+        .code(5)
         .stderr(predicate::str::contains(format!(
             "workspace `feat-here` already exists at {}",
             here.display()
@@ -1757,7 +1773,7 @@ fn a_branch_that_fails_forgets_the_location_it_asked_for() {
 
     env.octok(&["branch", "feat/taken", "--location", "vm"])
         .assert()
-        .code(1)
+        .code(5)
         .stderr(predicate::str::contains("already exists on the remote"));
 
     let project_file = env.read("projects/deeptree.yaml");
@@ -2051,8 +2067,12 @@ struct Up {
 
 impl Up {
     fn start(env: &Env) -> Self {
+        Self::start_with(env, &["up", "--branch", "feat/login"])
+    }
+
+    fn start_with(env: &Env, args: &[&str]) -> Self {
         let mut octok = env
-            .octok(&["up", "--branch", "feat/login"])
+            .octok(args)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -2339,7 +2359,7 @@ fn up_starts_only_the_repos_it_is_given_after_their_setup() {
 
     env.octok(&["up", "nope", "--branch", "feat/login"])
         .assert()
-        .code(1)
+        .code(3)
         .stderr(predicate::str::contains("nope"));
 }
 
@@ -2359,7 +2379,7 @@ fn up_uses_the_workspace_of_the_current_directory_and_fails_with_a_command() {
     env.octok(&["up"])
         .current_dir(env.dir.path())
         .assert()
-        .code(1)
+        .code(2)
         .stderr(predicate::str::contains("octok up --branch <branch>"));
 }
 
@@ -2370,7 +2390,7 @@ fn up_without_a_run_command_says_how_to_set_one() {
 
     env.octok(&["up", "--branch", "feat/login"])
         .assert()
-        .code(1)
+        .code(3)
         .stdout("")
         .stderr(predicate::str::contains("octok repo set <repo> --run"));
 }
@@ -2557,12 +2577,12 @@ fn dev_save_uses_the_workspace_of_the_current_directory_and_says_when_nothing_is
     env.octok(&["dev", "save"])
         .current_dir(env.dir.path())
         .assert()
-        .code(1)
+        .code(2)
         .stderr(predicate::str::contains("octok dev save --branch <branch>"));
     env.octok(&["dev", "save", "--file", "nope.env"])
         .current_dir(&checkout)
         .assert()
-        .code(1)
+        .code(3)
         .stderr(predicate::str::contains(
             "no checkout has the file `nope.env`",
         ));
@@ -2585,7 +2605,7 @@ fn branch_is_refused_when_the_dev_changes_no_longer_apply_unless_allowed() {
 
     env.octok(&["branch", "feat/other"])
         .assert()
-        .code(1)
+        .code(5)
         .stdout("")
         .stderr(
             predicate::str::contains("the dev changes of `backend` no longer apply to: app.py")
@@ -2739,27 +2759,31 @@ fn pr_review_names_the_workspace_after_the_pull_request_the_branch_or_the_given_
 fn pr_review_refuses_what_it_cannot_review_and_creates_nothing() {
     let env = Env::with_a_pull_request();
     env.pull_request("backend", 13, "patch-1", true);
-    let refused = |args: &[&str], message: &str| {
+    let refused = |code: i32, args: &[&str], message: &str| {
         env.octok(args)
             .assert()
-            .code(1)
+            .code(code)
             .stdout("")
             .stderr(predicate::str::contains(message));
     };
 
     refused(
+        2,
         &["pr", "review"],
         "error: nothing to review: choose a pull request or a branch for at least one repo",
     );
     refused(
+        1,
         &["pr", "review", "--pr", "backend=13"],
         "error: pull request #13 of `backend` comes from a fork",
     );
     refused(
+        1,
         &["pr", "review", "--pr", "backend=99"],
         "Could not resolve to a PullRequest with the number of 99",
     );
     refused(
+        2,
         &[
             "pr",
             "review",
@@ -2771,19 +2795,16 @@ fn pr_review_refuses_what_it_cannot_review_and_creates_nothing() {
         "error: repo `backend` is given more than once",
     );
     refused(
+        3,
         &["pr", "review", "--pr", "billing=12"],
         "error: repo `billing` is not registered",
     );
     refused(
+        3,
         &["pr", "review", "--branch", "frontend=feat/login"],
         "error: repo `frontend` has no branch `feat/login` on its remote",
     );
-    let misuse = |args: &[&str], message: &str| {
-        env.octok(args)
-            .assert()
-            .code(2)
-            .stderr(predicate::str::contains(message));
-    };
+    let misuse = |args: &[&str], message: &str| refused(2, args, message);
     let number = "expected `<repo>=<number>`, e.g. `backend=12`";
     misuse(&["pr", "review", "--pr", "backend"], number);
     misuse(&["pr", "review", "--pr", "backend=twelve"], number);
@@ -2801,7 +2822,7 @@ fn pr_review_checks_every_flag_before_it_asks_gh_anything() {
 
     env.octok(&["pr", "review", "--pr", "backend=12", "--branch", "nope=x"])
         .assert()
-        .code(1)
+        .code(3)
         .stderr("error: repo `nope` is not registered\n");
 }
 
@@ -2833,7 +2854,7 @@ fn pr_review_remembers_what_a_workspace_reviews() {
         "pr-backend-12",
     ])
     .assert()
-    .code(1)
+    .code(5)
     .stdout("")
     .stderr(predicate::str::contains(
         "error: workspace `pr-backend-12` already reviews other branches: backend=feat/login\n\
@@ -2870,7 +2891,7 @@ fn pr_review_refuses_a_branch_that_another_workspace_has() {
 
     env.octok(&["pr", "review", "--pr", "backend=12"])
         .assert()
-        .code(1)
+        .code(5)
         .stderr(predicate::str::contains(format!(
             "error: branch `feat/login` of `backend` is already checked out in {}",
             // git names the folder by its real path.
@@ -3034,4 +3055,600 @@ fn pr_review_stops_before_any_question_when_it_cannot_succeed() {
     let rest = terminal.exp_eof().unwrap();
 
     assert!(!rest.contains("Pull request or branch"), "{rest}");
+}
+
+#[test]
+fn json_is_accepted_before_and_after_any_command() {
+    let env = Env::with_repos(&["frontend"]);
+
+    for args in [["--json", "status"], ["status", "--json"]] {
+        let (code, status) = env.document(&args);
+        assert_eq!(code, Some(0));
+        assert_eq!(status["schema"], 1);
+        assert_eq!(status["project"], "deeptree");
+    }
+}
+
+#[test]
+fn project_commands_print_the_resulting_project_as_json() {
+    let env = Env::new();
+    let file = env.dir.path().join("projects/deeptree.yaml");
+    let project = |base: &str| {
+        serde_json::json!({
+            "schema": 1,
+            "project": "deeptree",
+            "base": base,
+            "location": "local",
+            "file": file,
+        })
+    };
+
+    let created = env.document(&["project", "init", "deeptree", "--base", "main", "--json"]);
+    assert_eq!(created, (Some(0), project("main")));
+    let changed = env.document(&["project", "set", "--base", "develop", "--json"]);
+    assert_eq!(changed, (Some(0), project("develop")));
+    let used = env.document(&["project", "use", "deeptree", "--json"]);
+    assert_eq!(
+        used,
+        (
+            Some(0),
+            serde_json::json!({"schema": 1, "default": "deeptree"})
+        )
+    );
+    let removed = env.document(&["project", "rm", "deeptree", "--json"]);
+    assert_eq!(
+        removed,
+        (
+            Some(0),
+            serde_json::json!({"schema": 1, "removed": "deeptree", "default": null})
+        )
+    );
+}
+
+#[test]
+fn project_set_location_json_reports_the_repos_cloned_again() {
+    let env = Env::with_repos(&["frontend"]);
+
+    let (code, moved) = env.document(&["project", "set", "--location", "vm", "--json"]);
+
+    assert_eq!(code, Some(0));
+    assert_eq!(moved["location"], env.machine_location("vm"));
+    assert_eq!(
+        moved["repos"],
+        serde_json::json!([{"key": "frontend", "outcome": "cloned"}])
+    );
+}
+
+#[test]
+fn repo_commands_print_the_resulting_repo_as_json() {
+    let env = Env::with_repos(&[]);
+    let url = env.remote_with_branch("frontend", "develop");
+    let repo = |alias: Option<&str>, base: &str| {
+        serde_json::json!({
+            "key": "frontend",
+            "alias": alias,
+            "url": url,
+            "base": base,
+            "location": "local",
+        })
+    };
+
+    let added = env.document(&["repo", "add", &url, "--alias", "web", "--json"]);
+    assert_eq!(
+        added,
+        (
+            Some(0),
+            serde_json::json!({"schema": 1, "project": "deeptree", "repo": repo(Some("web"), "main")})
+        )
+    );
+    let changed = env.document(&[
+        "repo",
+        "set",
+        "web",
+        "--no-alias",
+        "--base",
+        "develop",
+        "--json",
+    ]);
+    assert_eq!(
+        changed,
+        (
+            Some(0),
+            serde_json::json!({"schema": 1, "project": "deeptree", "repo": repo(None, "develop")})
+        )
+    );
+    let in_workspace = env.document(&[
+        "repo",
+        "set",
+        "frontend",
+        "--run",
+        "TOKEN=secret npm start",
+        "--branch",
+        "feat/login",
+        "--json",
+    ]);
+    assert_eq!(
+        in_workspace,
+        (
+            Some(0),
+            serde_json::json!({
+                "schema": 1,
+                "project": "deeptree",
+                "workspace": "feat-login",
+                "repo": repo(None, "develop"),
+            })
+        )
+    );
+    let removed = env.document(&["repo", "rm", "frontend", "--json"]);
+    assert_eq!(
+        removed,
+        (
+            Some(0),
+            serde_json::json!({"schema": 1, "project": "deeptree", "removed": "frontend"})
+        )
+    );
+}
+
+#[test]
+fn fetch_json_reports_every_repo_and_exits_6_when_one_fails() {
+    let env = Env::with_repos(&["frontend", "backend"]);
+    fs::remove_dir_all(env.dir.path().join("cache/deeptree/backend.git")).unwrap();
+
+    let fetched = env.document(&["fetch", "--json"]);
+    assert_eq!(
+        fetched,
+        (
+            Some(0),
+            serde_json::json!({
+                "schema": 1,
+                "project": "deeptree",
+                "repos": [
+                    {"key": "frontend", "outcome": "fetched"},
+                    {"key": "backend", "outcome": "cloned"},
+                ],
+            })
+        )
+    );
+
+    fs::remove_dir_all(env.remote_dir("frontend")).unwrap();
+    let out = env.octok(&["fetch", "--json"]).output().unwrap();
+    let failed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(out.status.code(), Some(6));
+    assert_eq!(failed["repos"][0]["key"], "frontend");
+    assert_eq!(failed["repos"][0]["error"]["code"], "command_failed");
+    let message = failed["repos"][0]["error"]["message"].as_str().unwrap();
+    assert!(message.contains("git fetch"), "{message}");
+    assert_eq!(
+        failed["repos"][1],
+        serde_json::json!({"key": "backend", "outcome": "fetched"})
+    );
+    // What git itself says is for people: the document already has the error.
+    assert!(!String::from_utf8_lossy(&out.stderr).contains("error: frontend"));
+}
+
+#[test]
+fn branch_and_checkout_json_describe_the_workspace_and_each_checkout() {
+    let env = Env::with_repos(&["frontend", "backend"]);
+    commit_on_new_branch(&env.remote_dir("backend"), "feat/shared", COMMIT_DATE);
+    let workspace = |name: &str, frontend: &str, backend: &str| {
+        let path = env.workspace_dir(name);
+        serde_json::json!({
+            "schema": 1,
+            "project": "deeptree",
+            "workspace": name,
+            "path": path,
+            "repos": [
+                {"key": "frontend", "path": path.join("frontend"), "outcome": frontend},
+                {"key": "backend", "path": path.join("backend"), "outcome": backend},
+            ],
+        })
+    };
+
+    let out = env
+        .octok(&["branch", "feat/login", "--json"])
+        .output()
+        .unwrap();
+    let created: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(created, workspace("feat-login", "created", "created"));
+    assert!(!String::from_utf8_lossy(&out.stderr).contains("created workspace"));
+
+    let kept = env.document(&["checkout", "feat/login", "--json"]);
+    assert_eq!(kept, (Some(0), workspace("feat-login", "kept", "kept")));
+
+    fs::remove_dir_all(env.workspace_dir("feat-login").join("frontend")).unwrap();
+    let restored = env.document(&["checkout", "feat/login", "--json"]);
+    assert_eq!(
+        restored,
+        (Some(0), workspace("feat-login", "restored", "kept"))
+    );
+
+    let tracked = env.document(&["checkout", "feat/shared", "--json"]);
+    assert_eq!(
+        tracked,
+        (Some(0), workspace("feat-shared", "created", "tracked"))
+    );
+}
+
+#[test]
+fn checkout_json_gives_the_path_of_a_checkout_on_another_machine() {
+    let env = Env::with_repos(&["frontend"]);
+    env.octok(&["repo", "add", &env.remote("backend"), "--location", "vm"])
+        .assert()
+        .success();
+
+    let (code, created) = env.document(&["checkout", "-b", "feat/login", "--json"]);
+
+    assert_eq!(code, Some(0));
+    let here = env.workspace_dir("feat-login");
+    let there = env.machine_root().join("workspaces/deeptree/feat-login");
+    assert_eq!(created["path"], serde_json::json!(here));
+    assert_eq!(
+        created["repos"][0]["path"],
+        serde_json::json!(here.join("frontend"))
+    );
+    assert_eq!(
+        created["repos"][1]["path"],
+        format!("vm:{}", there.join("backend").display())
+    );
+}
+
+#[test]
+fn pr_review_json_describes_the_workspace() {
+    let env = Env::with_a_pull_request();
+
+    let (code, review) = env.document(&["pr", "review", "--pr", "backend=12", "--json"]);
+
+    assert_eq!(code, Some(0));
+    assert_eq!(review["workspace"], "pr-backend-12");
+    assert_eq!(
+        review["path"],
+        serde_json::json!(env.workspace_dir("pr-backend-12"))
+    );
+    let outcomes: Vec<&str> = review["repos"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|repo| repo["outcome"].as_str().unwrap())
+        .collect();
+    assert_eq!(outcomes, ["created", "tracked", "created"]);
+}
+
+#[test]
+fn pull_json_reports_the_outcome_of_each_repo() {
+    let env = Env::with_repos(&["frontend", "backend", "agent"]);
+    env.octok(&["branch", "feat/login"]).assert().success();
+    for name in ["frontend", "agent"] {
+        git(
+            &env.remote_dir(name),
+            &["checkout", "--quiet", "-b", "feat/login"],
+        );
+    }
+    commit(&env.remote_dir("frontend"), "pushed by a teammate");
+    fs::remove_dir_all(env.remote_dir("backend")).unwrap();
+
+    let out = env
+        .octok(&["pull", "feat/login", "--json"])
+        .output()
+        .unwrap();
+
+    let pulled: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(out.status.code(), Some(6));
+    assert_eq!(pulled["schema"], 1);
+    assert_eq!(pulled["project"], "deeptree");
+    assert_eq!(pulled["workspace"], "feat-login");
+    assert_eq!(
+        pulled["repos"][0],
+        serde_json::json!({"key": "frontend", "outcome": "updated"})
+    );
+    assert_eq!(pulled["repos"][1]["error"]["code"], "command_failed");
+    assert_eq!(
+        pulled["repos"][2],
+        serde_json::json!({"key": "agent", "outcome": "up_to_date"})
+    );
+}
+
+#[test]
+fn rm_json_says_what_was_removed_or_why_it_was_refused() {
+    let env = Env::with_repos(&["frontend"]);
+    env.octok(&["branch", "feat/login"]).assert().success();
+    fs::write(
+        env.workspace_dir("feat-login").join("frontend/draft.txt"),
+        "wip",
+    )
+    .unwrap();
+
+    let out = env.octok(&["rm", "feat/login", "--json"]).output().unwrap();
+    let refused: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(out.status.code(), Some(4));
+    assert_eq!(out.stderr, b"");
+    assert_eq!(refused["schema"], 1);
+    let error = &refused["error"];
+    assert_eq!(error["code"], "workspace_has_work");
+    assert_eq!(error["workspace"], "feat-login");
+    assert_eq!(
+        error["reasons"],
+        serde_json::json!(["frontend: uncommitted changes"])
+    );
+    let message = error["message"].as_str().unwrap();
+    assert!(
+        message.starts_with("workspace `feat-login` has work"),
+        "{message}"
+    );
+
+    let removed = env.document(&["rm", "--force", "feat/login", "--json"]);
+    assert_eq!(
+        removed,
+        (
+            Some(0),
+            serde_json::json!({"schema": 1, "project": "deeptree", "removed": "feat-login"})
+        )
+    );
+    let (code, missing) = env.document(&["rm", "feat/login", "--json"]);
+    assert_eq!(code, Some(3));
+    assert_eq!(missing["error"]["code"], "workspace_not_found");
+    assert_eq!(missing["error"]["workspace"], "feat/login");
+}
+
+#[test]
+fn a_failure_exits_with_the_code_of_its_class() {
+    let env = Env::with_repos(&["frontend"]);
+    env.octok(&["branch", "feat/login"]).assert().success();
+    let code_of = |args: &[&str]| env.document(args).1["error"]["code"].clone();
+
+    // 2: the command is not written the way octok takes it.
+    env.octok(&["repo", "add", "not-a-url"]).assert().code(2);
+    assert_eq!(
+        code_of(&["repo", "add", "not-a-url", "--json"]),
+        "invalid_url"
+    );
+    env.octok(&["pull"])
+        .current_dir(env.dir.path())
+        .assert()
+        .code(2);
+    // 3: what it names is not there.
+    env.octok(&["repo", "rm", "nope"]).assert().code(3);
+    assert_eq!(code_of(&["repo", "rm", "nope", "--json"]), "repo_not_found");
+    env.octok(&["-p", "nope", "status"]).assert().code(3);
+    // 5: it conflicts with what exists.
+    env.octok(&["project", "init", "deeptree"]).assert().code(5);
+    env.octok(&["branch", "feat/login"]).assert().code(5);
+    assert_eq!(
+        code_of(&["branch", "feat/login", "--json"]),
+        "workspace_exists"
+    );
+    env.octok(&["repo", "rm", "frontend"]).assert().code(5);
+    // 7: a machine or a program cannot be reached.
+    env.octok(&["project", "set", "--location", "unreachable"])
+        .assert()
+        .code(7);
+    let unreachable = ["project", "set", "--location", "unreachable", "--json"];
+    assert_eq!(env.document(&unreachable).1["error"]["host"], "unreachable");
+    // 1: anything else.
+    env.octok(&["repo", "add", &env.remote_url("missing")])
+        .assert()
+        .code(1);
+}
+
+#[test]
+fn a_failure_in_text_stays_on_stderr() {
+    let env = Env::with_repos(&[]);
+
+    env.octok(&["repo", "rm", "nope"])
+        .assert()
+        .code(3)
+        .stdout("")
+        .stderr("error: repo `nope` is not registered\n");
+}
+
+#[test]
+fn a_command_octok_cannot_read_is_a_json_failure_too() {
+    let env = Env::with_repos(&["frontend"]);
+
+    for args in [
+        vec!["--json", "nope"],
+        vec!["repo", "set", "frontend", "--json"],
+        vec!["status", "--json", "--nope"],
+    ] {
+        let out = env.octok(&args).output().unwrap();
+        let failure: serde_json::Value =
+            serde_json::from_slice(&out.stdout).unwrap_or_else(|error| panic!("{args:?}: {error}"));
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        assert_eq!(out.stderr, b"", "{args:?}");
+        assert_eq!(failure["schema"], 1);
+        assert_eq!(failure["error"]["code"], "usage");
+        let message = failure["error"]["message"].as_str().unwrap();
+        assert!(message.contains("Usage: octok"), "{message}");
+        assert!(!message.starts_with("error: "), "{message}");
+    }
+    env.octok(&["nope"])
+        .assert()
+        .code(2)
+        .stdout("")
+        .stderr(predicate::str::starts_with("error: "));
+    env.octok(&["--help", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::starts_with("octotask: "));
+}
+
+#[test]
+fn json_at_a_terminal_asks_nothing() {
+    let env = Env::new();
+
+    let printed = finish(env.terminal(&["project", "init", "deeptree", "--json"]));
+    assert_eq!(last_document(&printed)["base"], "staging");
+
+    let url = env.remote_with_branch("frontend", "staging");
+    let printed = finish(env.terminal(&["repo", "add", &url, "--json"]));
+    assert_eq!(last_document(&printed)["repo"]["key"], "frontend");
+    assert_eq!(
+        last_document(&printed)["repo"]["alias"],
+        serde_json::Value::Null
+    );
+
+    let mut terminal = env.terminal(&["pr", "review", "--json"]);
+    let printed = terminal.exp_eof().unwrap();
+    assert_eq!(
+        last_document(&printed)["error"]["code"],
+        "nothing_to_review"
+    );
+}
+
+#[test]
+fn json_at_a_terminal_refuses_a_base_missing_on_the_remote_without_asking() {
+    let env = Env::with_repos(&[]);
+    let url = env.remote("frontend");
+
+    let mut terminal = env.terminal(&["repo", "add", &url, "--base", "nope", "--json"]);
+    let printed = terminal.exp_eof().unwrap();
+
+    let failure = last_document(&printed);
+    assert_eq!(failure["error"]["code"], "base_not_found");
+    assert_eq!(failure["error"]["repo"], "frontend");
+    assert_eq!(failure["error"]["base"], "nope");
+}
+
+#[test]
+fn json_at_a_terminal_keeps_ssh_from_asking() {
+    let env = Env::with_repos(&[]);
+
+    finish(env.terminal(&["project", "set", "--location", "vm", "--json"]));
+
+    let log = fs::read_to_string(env.machine_file("ssh.log")).unwrap();
+    let connections: Vec<&str> = log.lines().filter(|line| line.contains("-- vm ")).collect();
+    assert!(!connections.is_empty(), "{log}");
+    for connection in connections {
+        assert!(connection.contains("BatchMode=yes"), "{connection}");
+    }
+}
+
+#[test]
+fn set_ssh_passphrase_is_refused_with_json() {
+    let env = Env::with_repos(&[]);
+
+    let (code, refused) = env.document(&["set-ssh-passphrase", "vm", "--json"]);
+
+    assert_eq!(code, Some(2));
+    assert_eq!(refused["error"]["code"], "needs_terminal");
+    assert!(!env.machine_file("ssh-add.log").exists());
+    assert!(!env.machine_file("ssh.log").exists());
+}
+
+#[test]
+fn dev_save_json_is_the_document_of_dev_show() {
+    let env = env_with_app(None);
+    let login = env.workspace_dir("feat-login").join("backend");
+    fs::write(
+        login.join("app.py"),
+        APP_PY.replace("port=8000", "port=9005"),
+    )
+    .unwrap();
+    fs::write(login.join(".env"), "TOKEN=secret\n").unwrap();
+
+    let saved = env.document(&[
+        "dev",
+        "save",
+        "--file",
+        ".env",
+        "--branch",
+        "feat/login",
+        "--json",
+    ]);
+
+    assert_eq!(saved.0, Some(0));
+    assert_eq!(saved, env.document(&["dev", "show", "--json"]));
+    assert_eq!(saved.1["repos"][0]["new"], serde_json::json!([".env"]));
+    assert!(!saved.1.to_string().contains("secret"), "{}", saved.1);
+}
+
+#[test]
+fn up_json_prints_one_event_per_line() {
+    let env = Env::with_repos(&["frontend", "backend"]);
+    env.octok(&["repo", "set", "frontend", "--run", "echo hello; exit 3"])
+        .assert()
+        .success();
+    env.octok(&["branch", "feat/login"]).assert().success();
+
+    let out = env
+        .octok(&["up", "--branch", "feat/login", "--json"])
+        .output()
+        .unwrap();
+
+    let events: Vec<serde_json::Value> = String::from_utf8(out.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap_or_else(|error| panic!("{error}: {line}")))
+        .collect();
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.stderr, b"");
+    assert_eq!(
+        events,
+        [
+            serde_json::json!({
+                "schema": 1,
+                "event": "started",
+                "project": "deeptree",
+                "workspace": "feat-login",
+                "repos": ["frontend"],
+            }),
+            serde_json::json!({
+                "schema": 1,
+                "event": "output",
+                "repo": "frontend",
+                "line": "$ echo hello; exit 3",
+            }),
+            serde_json::json!({
+                "schema": 1,
+                "event": "output",
+                "repo": "frontend",
+                "line": "hello",
+            }),
+            serde_json::json!({
+                "schema": 1,
+                "event": "exited",
+                "repo": "frontend",
+                "code": 3,
+                "signal": null,
+            }),
+        ]
+    );
+}
+
+#[test]
+fn up_json_reports_a_repo_stopped_on_ctrl_c_with_the_exit_code_of_its_signal() {
+    let sleeping = Sleeping::here();
+    let mut up = Up::start_with(&sleeping.env, &["up", "--branch", "feat/login", "--json"]);
+    up.wait_for_line(r#"{"schema":1,"event":"output","repo":"frontend","line":"ready"}"#);
+
+    up.signal("-INT");
+    let mut rest = String::new();
+    std::io::Read::read_to_string(&mut up.stdout, &mut rest).unwrap();
+    let (code, _stderr) = up.finish();
+
+    assert_eq!(code, Some(130));
+    let exited: serde_json::Value = serde_json::from_str(rest.lines().last().unwrap()).unwrap();
+    assert_eq!(
+        exited,
+        serde_json::json!({
+            "schema": 1,
+            "event": "exited",
+            "repo": "frontend",
+            // 128 + SIGTERM, as a shell reports a command that a signal ended.
+            "code": 143,
+            "signal": null,
+        })
+    );
+    sleeping.assert_stopped();
+}
+
+#[test]
+fn up_json_fails_with_a_document_when_nothing_can_start() {
+    let env = Env::with_repos(&["frontend"]);
+    env.octok(&["branch", "feat/login"]).assert().success();
+
+    let (code, failure) = env.document(&["up", "--branch", "feat/login", "--json"]);
+
+    assert_eq!(code, Some(3));
+    assert_eq!(failure["error"]["code"], "nothing_to_run");
+    assert_eq!(failure["error"]["workspace"], "feat-login");
 }

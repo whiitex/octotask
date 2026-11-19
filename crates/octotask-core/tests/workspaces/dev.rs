@@ -346,7 +346,7 @@ fn pull_keeps_the_dev_changes_of_a_file_that_changes_on_the_remote() {
     let report = pull_workspace(&fx.home(), &fx.project(), "feat-other").unwrap();
 
     assert!(
-        matches!(report[0].1, Ok(PullOutcome::Updated)),
+        matches!(report[0].result, Ok(PullOutcome::Updated)),
         "{report:?}"
     );
     let pulled = read(&other, "main.py");

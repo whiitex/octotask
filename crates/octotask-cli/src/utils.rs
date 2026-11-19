@@ -1,27 +1,170 @@
 use std::collections::HashMap;
-use std::io::{BufRead, Write};
+use std::fmt::Display;
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::os::unix::process::ExitStatusExt;
+use std::path::PathBuf;
 use std::process::{ExitCode, ExitStatus};
 
 use octotask_core::{
-    Checkout, Commit, DevChanges, NewWorkspace, Project, PullOutcome, Result, Status, UpEvent,
-    WorkspaceStatus,
+    Checkout, CheckoutOutcome, Commit, DevChanges, Error, ErrorKind, FetchOutcome, NewWorkspace,
+    Project, PullOutcome, Registry, RepoResult, Result, Status, UpEvent, WorkspaceStatus,
 };
+use serde::Serialize;
 use serde_json::json;
 use signal_hook::consts::SIGKILL;
 
 /// How a location on this machine is written.
 pub(crate) const LOCAL: &str = "local";
 
-pub(crate) fn print_projects(projects: &[String], default: Option<&str>, json: bool) {
-    if json {
-        println!(
-            "{}",
-            json!({"schema": 1, "default": default, "projects": projects})
-        );
-    } else if projects.is_empty() {
-        println!("no projects yet: create one with `octok project init <name>`");
+/// Version of the JSON documents: it changes only when a field is removed or changes meaning.
+const SCHEMA: u32 = 1;
+
+/// Exit code of a command that octok cannot read, as clap gives it.
+const USAGE: u8 = 2;
+/// Exit code of a command that failed for some repos and went well for the others.
+const SOME_REPOS_FAILED: u8 = 6;
+
+/// How a command says what it did: text for people, or JSON documents on stdout.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Output {
+    json: bool,
+}
+
+impl Output {
+    pub(crate) fn new(json: bool) -> Self {
+        Self { json }
+    }
+
+    /// Whether octok may ask a question: only a person at a terminal answers one, and
+    /// who asks for JSON is not one.
+    pub(crate) fn may_ask(self) -> bool {
+        !self.json && io::stdin().is_terminal()
+    }
+
+    /// Refuses, with `--json`, a `command` that only works by asking at the terminal.
+    pub(crate) fn needs_terminal(self, command: &'static str) -> Result<()> {
+        if self.json {
+            Err(Error::NeedsTerminal(command))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Says what a command did: `value` as a document with `--json`, else what `text` prints.
+    pub(crate) fn result<T: Serialize>(self, value: &T, text: impl FnOnce(&T)) {
+        if self.json {
+            print_document(value);
+        } else {
+            text(value);
+        }
+    }
+
+    /// A line for people, said as soon as a step of a command is done. With `--json`
+    /// the document at the end says it all.
+    pub(crate) fn note(self, line: impl Display) {
+        if !self.json {
+            println!("{line}");
+        }
+    }
+
+    /// Says why a command failed. Returns the exit code of that class of failure.
+    pub(crate) fn failure(self, error: &Error) -> ExitCode {
+        if self.json {
+            print_document(&json!({"error": error}));
+        } else {
+            eprintln!("error: {error}");
+        }
+        ExitCode::from(match error.kind() {
+            ErrorKind::Other => 1,
+            ErrorKind::Usage => USAGE,
+            ErrorKind::NotFound => 3,
+            ErrorKind::WorkAtRisk => 4,
+            ErrorKind::Conflict => 5,
+            ErrorKind::Unreachable => 7,
+        })
+    }
+}
+
+/// Says as a document why clap refused the command line. `message` is what clap prints.
+pub(crate) fn print_usage_failure(message: &str) -> ExitCode {
+    let message = message
+        .strip_prefix("error: ")
+        .unwrap_or(message)
+        .trim_end();
+    print_document(&json!({"error": {"code": "usage", "message": message}}));
+    ExitCode::from(USAGE)
+}
+
+/// Fails if any repo failed.
+pub(crate) fn report_exit_code<T>(report: &[RepoResult<T>]) -> ExitCode {
+    if report.iter().any(|repo| repo.result.is_err()) {
+        ExitCode::from(SOME_REPOS_FAILED)
     } else {
+        ExitCode::SUCCESS
+    }
+}
+
+/// What a command did for each repo of a project, or of one of its workspaces.
+#[derive(Serialize)]
+pub(crate) struct Report<'a, T> {
+    pub(crate) project: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) workspace: Option<&'a str>,
+    pub(crate) repos: Vec<RepoResult<T>>,
+}
+
+/// A project as its settings leave it.
+#[derive(Serialize)]
+pub(crate) struct ProjectDocument {
+    project: String,
+    base: String,
+    location: String,
+    file: PathBuf,
+    /// The repos cloned again where the project moved, when it did.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) repos: Option<Vec<RepoResult<FetchOutcome>>>,
+}
+
+impl ProjectDocument {
+    pub(crate) fn read(registry: &Registry, name: &str) -> Result<Self> {
+        let project = registry.load_project(name)?;
+        let location = project.location.as_ref();
+        Ok(Self {
+            location: location.map_or_else(|| LOCAL.to_string(), ToString::to_string),
+            file: registry.home().project_file(name),
+            project: project.name,
+            base: project.base,
+            repos: None,
+        })
+    }
+}
+
+/// A repo as its settings leave it, in the project or in one `workspace` only.
+/// Its commands are never shown: they may hold secrets.
+#[derive(Serialize)]
+pub(crate) struct RepoDocument<'a> {
+    project: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workspace: Option<&'a str>,
+    repo: RepoRow<'a>,
+}
+
+impl<'a> RepoDocument<'a> {
+    pub(crate) fn new(project: &'a Project, workspace: Option<&'a str>, key: &'a str) -> Self {
+        Self {
+            project: &project.name,
+            workspace,
+            repo: repo_row(project, key),
+        }
+    }
+}
+
+pub(crate) fn print_projects(out: Output, projects: &[String], default: Option<&str>) {
+    let document = json!({"default": default, "projects": projects});
+    out.result(&document, |_| {
+        if projects.is_empty() {
+            println!("no projects yet: create one with `octok project init <name>`");
+        }
         for name in projects {
             let marker = if default == Some(name.as_str()) {
                 "*"
@@ -30,50 +173,71 @@ pub(crate) fn print_projects(projects: &[String], default: Option<&str>, json: b
             };
             println!("{marker} {name}");
         }
-    }
+    });
 }
 
-pub(crate) fn print_repos(project: &Project, json: bool) {
+pub(crate) fn print_repos(out: Output, project: &Project) {
     let rows: Vec<RepoRow> = project
         .repos
-        .iter()
-        .map(|(key, repo)| RepoRow {
-            key,
-            alias: repo.alias.as_deref(),
-            url: &repo.url,
-            base: project.effective_base(repo),
-            location: project.effective_location(repo, None).to_string(),
-        })
+        .keys()
+        .map(|key| repo_row(project, key))
         .collect();
-    if json {
-        print_repos_json(&project.name, &rows);
-    } else if rows.is_empty() {
-        println!(
-            "no repos in {}: add one with `octok repo add <url>`",
-            project.name
-        );
-    } else {
-        print_repos_table(&rows);
-    }
+    let document = json!({"project": project.name, "repos": rows});
+    out.result(&document, |_| {
+        if rows.is_empty() {
+            println!(
+                "no repos in {}: add one with `octok repo add <url>`",
+                project.name
+            );
+        } else {
+            print_repos_table(&rows);
+        }
+    });
 }
 
-pub(crate) fn print_pull_report(
-    project: &Project,
-    report: Vec<(String, Result<PullOutcome>)>,
-) -> ExitCode {
-    print_report(project, report, |outcome| pull_message(outcome).to_string())
+pub(crate) fn print_fetch_report(project: &Project, report: &[RepoResult<FetchOutcome>]) {
+    print_report(project, report, |_| "fetched".to_string());
+}
+
+pub(crate) fn print_pull_report(project: &Project, report: &[RepoResult<PullOutcome>]) {
+    print_report(project, report, |outcome| {
+        pull_message(*outcome).to_string()
+    });
+}
+
+/// Says what opening the workspace of `branch` did. As text, only the path goes to
+/// stdout, so `cd "$(octok branch <name>)"` works.
+pub(crate) fn print_workspace(
+    out: Output,
+    project_name: &str,
+    name: &str,
+    workspace: &NewWorkspace,
+) {
+    #[derive(Serialize)]
+    struct Document<'a> {
+        project: &'a str,
+        workspace: &'a str,
+        #[serde(flatten)]
+        opened: &'a NewWorkspace,
+    }
+    let document = Document {
+        project: project_name,
+        workspace: name,
+        opened: workspace,
+    };
+    out.result(&document, |_| {
+        print_new_workspace(project_name, name, workspace);
+        println!("{}", workspace.path.display());
+    });
 }
 
 /// Says on stderr what creating or completing a workspace did. Silent when the workspace
 /// was already complete.
-pub(crate) fn print_new_workspace(project_name: &str, name: &str, workspace: &NewWorkspace) {
-    let NewWorkspace {
-        created,
-        tracked,
-        restored,
-        kept,
-        ..
-    } = workspace;
+fn print_new_workspace(project_name: &str, name: &str, workspace: &NewWorkspace) {
+    let created = workspace.repos_with(CheckoutOutcome::Created);
+    let tracked = workspace.repos_with(CheckoutOutcome::Tracked);
+    let restored = workspace.repos_with(CheckoutOutcome::Restored);
+    let kept = workspace.repos_with(CheckoutOutcome::Kept);
     if created.is_empty() && tracked.is_empty() && restored.is_empty() {
         return;
     }
@@ -92,34 +256,31 @@ pub(crate) fn print_new_workspace(project_name: &str, name: &str, workspace: &Ne
     if !created.is_empty() && !only_new_branches {
         eprintln!("  new branch from the base: {}", created.join(", "));
     }
-    for (repo, worktree) in &workspace.remote_worktrees {
-        eprintln!("  {repo}: {}", worktree.display());
+    for repo in workspace
+        .repos
+        .iter()
+        .filter(|repo| repo.on_another_machine)
+    {
+        eprintln!("  {}: {}", repo.key, repo.path.display());
     }
 }
 
-/// Prints one line per repo on stdout and the errors on stderr. Fails if any repo failed.
-pub(crate) fn print_report<T>(
-    project: &Project,
-    report: Vec<(String, Result<T>)>,
-    describe: impl Fn(T) -> String,
-) -> ExitCode {
-    let rows: Vec<(String, Result<T>)> = report
-        .into_iter()
-        .map(|(key, result)| (project_repo_label(project, &key), result))
+/// Prints one line per repo on stdout and the errors on stderr.
+fn print_report<T>(project: &Project, report: &[RepoResult<T>], describe: impl Fn(&T) -> String) {
+    let labels: Vec<String> = report
+        .iter()
+        .map(|repo| project_repo_label(project, &repo.key))
         .collect();
-    let label_width = max_width(rows.iter().map(|(label, _)| label.as_str()));
-    let mut code = ExitCode::SUCCESS;
-    for (label, result) in rows {
-        match result {
+    let label_width = max_width(labels.iter().map(String::as_str));
+    for (repo, label) in report.iter().zip(labels) {
+        match &repo.result {
             Ok(outcome) => println!("{label:label_width$}  {}", describe(outcome)),
             Err(error) => {
                 println!("{label:label_width$}  failed");
                 eprintln!("error: {label}: {error}");
-                code = ExitCode::FAILURE;
             }
         }
     }
-    code
 }
 
 /// Asks a yes/no question and reads one line. Anything but `y` or `yes` means no.
@@ -188,9 +349,34 @@ fn how_it_ended(status: ExitStatus, stopping: bool) -> String {
     }
 }
 
-/// Lists what is saved of the dev changes of each repo, with the diff of the tracked
-/// files when `with_diff`. The files git does not track are only named: they hold secrets.
-pub(crate) fn print_dev_changes(project: &Project, repos: &[DevChanges], with_diff: bool) {
+/// Lists what is saved of the dev changes of each repo, as text with the diff of the
+/// tracked files when `with_diff`. The files git does not track are only named, in the
+/// document too: they hold secrets.
+pub(crate) fn print_dev_changes(
+    out: Output,
+    project: &Project,
+    repos: &[DevChanges],
+    with_diff: bool,
+) {
+    let rows: Vec<_> = repos
+        .iter()
+        .map(|changes| {
+            json!({
+                "key": changes.repo,
+                "alias": repo_alias(project, &changes.repo),
+                "changed": changes.changed,
+                "new": changes.new,
+                "diff": changes.diff,
+            })
+        })
+        .collect();
+    let document = json!({"project": project.name, "repos": rows});
+    out.result(&document, |_| {
+        print_dev_changes_text(project, repos, with_diff);
+    });
+}
+
+fn print_dev_changes_text(project: &Project, repos: &[DevChanges], with_diff: bool) {
     for changes in repos {
         println!("{}", project_repo_label(project, &changes.repo));
         if changes.changed.is_empty() && changes.new.is_empty() {
@@ -208,27 +394,6 @@ pub(crate) fn print_dev_changes(project: &Project, repos: &[DevChanges], with_di
     }
 }
 
-/// Like the text of `print_dev_changes` with the diff: the files git does not track are
-/// only named here too.
-pub(crate) fn print_dev_changes_json(project: &Project, repos: &[DevChanges]) {
-    let repos: Vec<_> = repos
-        .iter()
-        .map(|changes| {
-            json!({
-                "key": changes.repo,
-                "alias": repo_alias(project, &changes.repo),
-                "changed": changes.changed,
-                "new": changes.new,
-                "diff": changes.diff,
-            })
-        })
-        .collect();
-    println!(
-        "{}",
-        json!({"schema": 1, "project": project.name, "repos": repos})
-    );
-}
-
 /// How a repo is shown: its key, followed by the alias when it has one.
 pub(crate) fn repo_label(key: &str, alias: Option<&str>) -> String {
     match alias {
@@ -237,45 +402,49 @@ pub(crate) fn repo_label(key: &str, alias: Option<&str>) -> String {
     }
 }
 
-pub(crate) fn print_status(status: &Status, json: bool) {
-    if json {
-        let mut value = serde_json::to_value(status).expect("status is plain data");
-        value["schema"] = json!(1);
-        println!("{value}");
-    } else {
-        println!("project: {}\n", status.project);
-        print_status_repos(status);
-        println!();
-        print_status_workspaces(status);
-        print_orphan_caches(status);
-    }
+pub(crate) fn print_status(status: &Status) {
+    println!("project: {}\n", status.project);
+    print_status_repos(status);
+    println!();
+    print_status_workspaces(status);
+    print_orphan_caches(status);
 }
 
+/// One JSON document on one line of stdout: `value` with the version of the documents.
+fn print_document<T: Serialize>(value: &T) {
+    #[derive(Serialize)]
+    struct Document<'a, T> {
+        schema: u32,
+        #[serde(flatten)]
+        body: &'a T,
+    }
+    let document = Document {
+        schema: SCHEMA,
+        body: value,
+    };
+    let line = serde_json::to_string(&document).expect("a document is plain data");
+    println!("{line}");
+}
+
+#[derive(Serialize)]
 struct RepoRow<'a> {
     key: &'a str,
     alias: Option<&'a str>,
     url: &'a str,
+    /// The base branch in effect: the repo's own, else the project's.
     base: &'a str,
     location: String,
 }
 
-fn print_repos_json(project_name: &str, rows: &[RepoRow]) {
-    let repos: Vec<_> = rows
-        .iter()
-        .map(|row| {
-            json!({
-                "key": row.key,
-                "alias": row.alias,
-                "url": row.url,
-                "base": row.base,
-                "location": row.location,
-            })
-        })
-        .collect();
-    println!(
-        "{}",
-        json!({"schema": 1, "project": project_name, "repos": repos})
-    );
+fn repo_row<'a>(project: &'a Project, key: &'a str) -> RepoRow<'a> {
+    let repo = &project.repos[key];
+    RepoRow {
+        key,
+        alias: repo.alias.as_deref(),
+        url: &repo.url,
+        base: project.effective_base(repo),
+        location: project.effective_location(repo, None).to_string(),
+    }
 }
 
 fn print_repos_table(rows: &[RepoRow]) {

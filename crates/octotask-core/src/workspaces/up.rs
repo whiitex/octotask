@@ -1,25 +1,39 @@
 use std::io::{BufRead, BufReader, PipeReader};
+use std::os::unix::process::ExitStatusExt;
 use std::process::ExitStatus;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
+
+use serde::Serialize;
+use serde::ser::{SerializeMap, Serializer};
 
 use super::workspace::{Member, chosen_keys, members_of_existing};
 use crate::adapters::{Commands, Lifeline, Supervised, supervise};
 use crate::{Error, Home, Project, Result};
 
 /// What the commands of a workspace do while `Running::wait` follows them.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
 pub enum UpEvent<'a> {
     /// One line shown for a repo: a command octok runs, after `$ `, or what it wrote to
     /// stdout or stderr.
-    Output {
-        repo: &'a str,
-        line: &'a str,
-    },
+    Output { repo: &'a str, line: &'a str },
     Exited {
         repo: &'a str,
+        #[serde(flatten, serialize_with = "code_and_signal")]
         status: ExitStatus,
     },
+}
+
+/// `code` is `null` for a command ended by a signal, and `signal` is `null` otherwise.
+fn code_and_signal<S: Serializer>(
+    status: &ExitStatus,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    let mut map = serializer.serialize_map(Some(2))?;
+    map.serialize_entry("code", &status.code())?;
+    map.serialize_entry("signal", &status.signal())?;
+    map.end()
 }
 
 /// The commands of a workspace, started. Dropping it stops them.

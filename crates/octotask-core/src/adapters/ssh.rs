@@ -1,6 +1,7 @@
 use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::utils::{Place, run_attached, run_checked};
 use crate::config::{is_local, split_destination, validate_host};
@@ -32,6 +33,9 @@ const KEYCHAIN: [&str; 4] = ["-o", "IgnoreUnknown=UseKeychain", "-o", "UseKeycha
 pub(super) const KEEP_ALIVE: [&str; 4] =
     ["-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=3"];
 
+/// Whether ssh must fail instead of asking, even at a terminal.
+static NEVER_ASK: AtomicBool = AtomicBool::new(false);
+
 /// Folder of the octok home under the home of the remote user.
 const DEFAULT_ROOT: &str = ".octotask";
 
@@ -58,6 +62,12 @@ impl Ssh {
         Ok(Self {
             host: host.to_string(),
         })
+    }
+
+    /// From now on ssh fails instead of asking for a passphrase or the approval of a host
+    /// key, even at a terminal: for a caller that nobody watches.
+    pub fn never_ask() {
+        NEVER_ASK.store(true, Ordering::Relaxed);
     }
 
     /// Gives the key files ssh uses for this host to `ssh-add`, which asks for their passphrase
@@ -154,7 +164,7 @@ pub(super) fn command(
     if cfg!(target_os = "macos") {
         command.args(KEYCHAIN);
     }
-    if !io::stdin().is_terminal() {
+    if NEVER_ASK.load(Ordering::Relaxed) || !io::stdin().is_terminal() {
         // Nobody is there to type a passphrase or accept a host key: fail instead of waiting.
         command.args(["-o", "BatchMode=yes"]);
     }

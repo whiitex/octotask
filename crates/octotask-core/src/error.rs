@@ -1,6 +1,9 @@
 use std::path::PathBuf;
 use std::process::ExitStatus;
 
+use serde::ser::{Serialize, SerializeMap, Serializer};
+use serde_json::{Value, json};
+
 use crate::utils::CONFIG_VERSION;
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -159,6 +162,220 @@ pub enum Error {
         status: ExitStatus,
         stderr: String,
     },
+    #[error("`{0}` asks at the terminal, which `--json` never does: run it without `--json`")]
+    NeedsTerminal(&'static str),
+}
+
+/// What went wrong, in the few classes a caller may act on without reading the message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorKind {
+    /// The request is not one octok can take: a name it refuses, a project left out.
+    Usage,
+    NotFound,
+    /// Going on would lose work that exists nowhere else.
+    WorkAtRisk,
+    /// The request conflicts with what exists: already there, in use, no longer applies.
+    Conflict,
+    /// Another machine or a program octok needs cannot be reached.
+    Unreachable,
+    Other,
+}
+
+impl Error {
+    /// A name for this error that never changes, for programs. The message is for people.
+    pub fn code(&self) -> &'static str {
+        self.code_and_details().0
+    }
+
+    pub fn kind(&self) -> ErrorKind {
+        match self {
+            Self::InvalidName { .. }
+            | Self::InvalidLocation { .. }
+            | Self::InvalidUrl(_)
+            | Self::NoRepoKey(_)
+            | Self::NoDefaultProject
+            | Self::NothingToReview
+            | Self::RepoChosenTwice(_)
+            | Self::NotInWorkspace(_)
+            | Self::NeedsTerminal(_) => ErrorKind::Usage,
+            Self::RepoNotFound(_)
+            | Self::ProjectNotFound(_)
+            | Self::NoRepos(_)
+            | Self::BaseNotFound { .. }
+            | Self::BranchNotFound(_)
+            | Self::BranchNotOnRemote { .. }
+            | Self::WorkspaceNotFound(_)
+            | Self::NothingToRun(_)
+            | Self::NoRunCommand(_)
+            | Self::NoWorktree { .. }
+            | Self::DevFileNotFound(_) => ErrorKind::NotFound,
+            Self::WorkspaceHasWork { .. } => ErrorKind::WorkAtRisk,
+            Self::DuplicateRepo { .. }
+            | Self::DuplicateAlias { .. }
+            | Self::ProjectExists(_)
+            | Self::RepoInUse { .. }
+            | Self::BranchExists { .. }
+            | Self::BranchInUse { .. }
+            | Self::ProjectInUse { .. }
+            | Self::WorkspaceOfAnotherBranch { .. }
+            | Self::ReviewsOtherBranches { .. }
+            | Self::WorkspaceExists { .. }
+            | Self::StaleDevChanges { .. } => ErrorKind::Conflict,
+            Self::ToolNotFound(_) | Self::Spawn { .. } | Self::Ssh { .. } => ErrorKind::Unreachable,
+            Self::UnsupportedVersion { .. }
+            | Self::NameMismatch { .. }
+            | Self::Parse { .. }
+            | Self::Serialize { .. }
+            | Self::Io { .. }
+            | Self::ForkPullRequest { .. }
+            | Self::NoHome
+            | Self::UnexpectedOutput { .. }
+            | Self::CommandFailed { .. } => ErrorKind::Other,
+        }
+    }
+
+    /// The code of the error and the data it carries, by name. Both are an interface: a
+    /// released code or name keeps its meaning, whatever the variant is called later.
+    fn code_and_details(&self) -> (&'static str, Value) {
+        match self {
+            Self::InvalidName {
+                kind,
+                value,
+                reason,
+            } => (
+                "invalid_name",
+                json!({"kind": kind, "value": value, "reason": reason}),
+            ),
+            Self::InvalidLocation { value, reason } => (
+                "invalid_location",
+                json!({"value": value, "reason": reason}),
+            ),
+            Self::InvalidUrl(url) => ("invalid_url", json!({"url": url})),
+            Self::NoRepoKey(url) => ("no_repo_key", json!({"url": url})),
+            Self::DuplicateRepo { key, url } => {
+                ("duplicate_repo", json!({"repo": key, "url": url}))
+            }
+            Self::DuplicateAlias { alias, repo } => {
+                ("duplicate_alias", json!({"alias": alias, "repo": repo}))
+            }
+            Self::RepoNotFound(repo) => ("repo_not_found", json!({"repo": repo})),
+            Self::ProjectExists(project) => ("project_exists", json!({"project": project})),
+            Self::ProjectNotFound(project) => ("project_not_found", json!({"project": project})),
+            Self::NoDefaultProject => ("no_default_project", json!({})),
+            Self::UnsupportedVersion { path, version } => (
+                "unsupported_version",
+                json!({"path": path, "version": version, "expected": CONFIG_VERSION}),
+            ),
+            Self::NameMismatch {
+                path,
+                name,
+                expected,
+            } => (
+                "name_mismatch",
+                json!({"path": path, "name": name, "expected": expected}),
+            ),
+            Self::Parse { path, .. } => ("parse", json!({"path": path})),
+            Self::Serialize { path, .. } => ("serialize", json!({"path": path})),
+            Self::Io { path, .. } => ("io", json!({"path": path})),
+            Self::NoRepos(project) => ("no_repos", json!({"project": project})),
+            Self::RepoInUse { repo, workspaces } => (
+                "repo_in_use",
+                json!({"repo": repo, "workspaces": workspaces}),
+            ),
+            Self::BaseNotFound { repo, base } => {
+                ("base_not_found", json!({"repo": repo, "base": base}))
+            }
+            Self::BranchExists { branch, repos } => {
+                ("branch_exists", json!({"branch": branch, "repos": repos}))
+            }
+            Self::BranchNotFound(branch) => ("branch_not_found", json!({"branch": branch})),
+            Self::BranchNotOnRemote { repo, branch } => (
+                "branch_not_on_remote",
+                json!({"repo": repo, "branch": branch}),
+            ),
+            Self::BranchInUse { repo, branch, path } => (
+                "branch_in_use",
+                json!({"repo": repo, "branch": branch, "path": path}),
+            ),
+            Self::NothingToReview => ("nothing_to_review", json!({})),
+            Self::RepoChosenTwice(repo) => ("repo_chosen_twice", json!({"repo": repo})),
+            Self::ForkPullRequest { repo, number } => {
+                ("fork_pull_request", json!({"repo": repo, "number": number}))
+            }
+            Self::WorkspaceHasWork { name, reasons } => (
+                "workspace_has_work",
+                json!({"workspace": name, "reasons": reasons}),
+            ),
+            Self::ProjectInUse {
+                project,
+                workspaces,
+            } => (
+                "project_in_use",
+                json!({"project": project, "workspaces": workspaces}),
+            ),
+            Self::WorkspaceOfAnotherBranch { name, branch } => (
+                "workspace_of_another_branch",
+                json!({"workspace": name, "branch": branch}),
+            ),
+            Self::ReviewsOtherBranches { name, reviewed } => (
+                "reviews_other_branches",
+                json!({"workspace": name, "reviewed": reviewed}),
+            ),
+            Self::WorkspaceExists { name, path } => {
+                ("workspace_exists", json!({"workspace": name, "path": path}))
+            }
+            Self::WorkspaceNotFound(workspace) => {
+                ("workspace_not_found", json!({"workspace": workspace}))
+            }
+            Self::NotInWorkspace(usage) => ("not_in_workspace", json!({"usage": usage})),
+            Self::NothingToRun(workspace) => ("nothing_to_run", json!({"workspace": workspace})),
+            Self::NoRunCommand(repo) => ("no_run_command", json!({"repo": repo})),
+            Self::NoWorktree { repo, workspace } => {
+                ("no_worktree", json!({"repo": repo, "workspace": workspace}))
+            }
+            Self::StaleDevChanges { repo, files } => {
+                ("stale_dev_changes", json!({"repo": repo, "files": files}))
+            }
+            Self::DevFileNotFound(file) => ("dev_file_not_found", json!({"file": file})),
+            Self::NoHome => ("no_home", json!({})),
+            Self::ToolNotFound(tool) => ("tool_not_found", json!({"tool": tool})),
+            Self::Spawn { program, dir, .. } => ("spawn", json!({"program": program, "dir": dir})),
+            Self::Ssh { host, stderr } => ("ssh", json!({"host": host, "stderr": stderr})),
+            Self::UnexpectedOutput { command, output } => (
+                "unexpected_output",
+                json!({"command": command, "output": output}),
+            ),
+            Self::CommandFailed {
+                command,
+                dir,
+                status,
+                stderr,
+            } => (
+                "command_failed",
+                json!({
+                    "command": command,
+                    "dir": dir,
+                    "exit_code": status.code(),
+                    "stderr": stderr,
+                }),
+            ),
+            Self::NeedsTerminal(command) => ("needs_terminal", json!({"command": command})),
+        }
+    }
+}
+
+/// `{"code", "message"}`, followed by the data the error carries.
+impl Serialize for Error {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        let (code, details) = self.code_and_details();
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("code", code)?;
+        map.serialize_entry("message", &self.to_string())?;
+        for (name, value) in details.as_object().into_iter().flatten() {
+            map.serialize_entry(name, value)?;
+        }
+        map.end()
+    }
 }
 
 fn indented(lines: &[String]) -> String {
