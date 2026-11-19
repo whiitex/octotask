@@ -65,6 +65,26 @@ pub enum Error {
     BranchExists { branch: String, repos: Vec<String> },
     #[error("no repo has a branch `{0}` on its remote: create it with `octok checkout -b {0}`")]
     BranchNotFound(String),
+    #[error("repo `{repo}` has no branch `{branch}` on its remote")]
+    BranchNotOnRemote { repo: String, branch: String },
+    #[error(
+        "branch `{branch}` of `{repo}` is already checked out in {path}\na branch lives in one workspace at a time: use that workspace, or remove it first"
+    )]
+    BranchInUse {
+        repo: String,
+        branch: String,
+        path: PathBuf,
+    },
+    #[error(
+        "nothing to review: choose a pull request or a branch for at least one repo, with `--pr <repo>=<number>` or `--branch <repo>=<branch>`, or by answering `octok pr review` at a terminal"
+    )]
+    NothingToReview,
+    #[error("repo `{0}` is given more than once: choose one pull request or one branch for it")]
+    RepoChosenTwice(String),
+    #[error(
+        "pull request #{number} of `{repo}` comes from a fork: octok can only review a branch of the repo itself"
+    )]
+    ForkPullRequest { repo: String, number: u64 },
     #[error(
         "workspace `{name}` has work that would be lost:\n{}\nremove it anyway with `octok rm --force <branch>`",
         indented(.reasons)
@@ -82,6 +102,11 @@ pub enum Error {
         "workspace `{name}` is the one of the branch `{branch}`, whose name gives the same folder\nremove it with `octok rm {branch}`, or use another branch name"
     )]
     WorkspaceOfAnotherBranch { name: String, branch: String },
+    #[error(
+        "workspace `{name}` already reviews other branches: {}\nremove it with `octok rm {name}`, or choose another name with `--name`",
+        .reviewed.join(", ")
+    )]
+    ReviewsOtherBranches { name: String, reviewed: Vec<String> },
     #[error("workspace `{name}` already exists at {path}")]
     WorkspaceExists { name: String, path: PathBuf },
     #[error(

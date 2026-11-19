@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use octotask_core::{Error, Location, Project, repo_key_from_url};
 
 #[test]
@@ -590,5 +592,54 @@ fn removing_a_repo_forgets_its_run_commands_in_the_workspaces() {
 
     project.remove_repo("backend").unwrap();
 
+    assert!(project.workspaces.is_empty());
+}
+
+fn reviewed(repo: &str, branch: &str) -> HashMap<String, String> {
+    HashMap::from([(repo.to_string(), branch.to_string())])
+}
+
+#[test]
+fn a_review_is_saved_with_the_branch_of_its_workspace_and_of_each_repo() {
+    let mut project = project_with_backend();
+    let login = reviewed("backend", "feat/login");
+
+    project
+        .set_review("pr-backend-12", "pr-backend-12", &login)
+        .unwrap();
+    assert_eq!(
+        project.review("pr-backend-12"),
+        Some(("pr-backend-12", login.clone()))
+    );
+    assert_eq!(project.review("feat-login"), None);
+
+    // A run command of its own comes and goes without touching the review.
+    project
+        .set_workspace_run("pr-backend-12", "backend", Some("uv run main.py"))
+        .unwrap();
+    project
+        .set_workspace_run("pr-backend-12", "backend", None)
+        .unwrap();
+    assert_eq!(
+        project.review("pr-backend-12"),
+        Some(("pr-backend-12", login))
+    );
+
+    project.clear_review("pr-backend-12");
+    assert!(project.workspaces.is_empty());
+}
+
+#[test]
+fn a_review_needs_known_repos_and_valid_branches() {
+    let mut project = project_with_backend();
+
+    assert!(matches!(
+        project.set_review("pr-1", "pr-1", &reviewed("nope", "feat/login")),
+        Err(Error::RepoNotFound(repo)) if repo == "nope"
+    ));
+    assert!(matches!(
+        project.set_review("pr-1", "pr-1", &reviewed("backend", "bad branch")),
+        Err(Error::InvalidName { kind: "branch", .. })
+    ));
     assert!(project.workspaces.is_empty());
 }

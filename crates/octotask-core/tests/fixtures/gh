@@ -1,0 +1,53 @@
+#!/bin/sh
+# Stands in for `gh` in the tests, with no network.
+# It answers `pr list` and `pr view <number>` for the repo given with `--repo`, from the
+# files `$FAKE_GH_DIR/<repo>/<number>.json`: one open pull request each, as `gh` prints it.
+# `<repo>` is the last part of the url of the repo, without `.git`.
+if [ "$1" != "pr" ]; then
+    echo "fake gh: unexpected command: $*" >&2
+    exit 1
+fi
+action=$2
+shift 2
+
+number=
+repo=
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --repo) repo=$2; shift 2 ;;
+        --state | --limit | --json) shift 2 ;;
+        *) number=$1; shift ;;
+    esac
+done
+dir="$FAKE_GH_DIR/$(basename "$repo" .git)"
+
+# A repo with a file `error` is one `gh` cannot read: it fails with that text.
+if [ -f "$dir/error" ]; then
+    cat "$dir/error" >&2
+    exit 1
+fi
+
+case "$action" in
+    list)
+        printf '['
+        separator=
+        for file in "$dir"/*.json; do
+            [ -f "$file" ] || continue
+            printf '%s' "$separator"
+            cat "$file"
+            separator=,
+        done
+        printf ']\n'
+        ;;
+    view)
+        if [ ! -f "$dir/$number.json" ]; then
+            echo "GraphQL: Could not resolve to a PullRequest with the number of $number. (repository.pullRequest)" >&2
+            exit 1
+        fi
+        cat "$dir/$number.json"
+        ;;
+    *)
+        echo "fake gh: unexpected command: pr $action" >&2
+        exit 1
+        ;;
+esac

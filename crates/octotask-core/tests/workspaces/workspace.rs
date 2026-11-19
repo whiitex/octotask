@@ -1,8 +1,10 @@
+use std::collections::HashMap;
 use std::fs;
 
 use octotask_core::{
-    Error, Location, NewRepo, PullOutcome, checkout_workspace, create_workspace, locate_workspace,
-    pull_workspace, register_repo, remove_workspace, status, workspace_path,
+    Error, Location, NewRepo, NewWorkspace, PullOutcome, Result, checkout_workspace,
+    create_workspace, locate_workspace, pull_workspace, register_repo, remove_workspace,
+    review_workspace, status, workspace_path,
 };
 
 use super::{
@@ -15,6 +17,31 @@ fn fixture_with_repos(names: &[&str]) -> Fixture {
         fx.register(&fx.remote(name));
     }
     fx
+}
+
+/// A project whose backend has the branch `feat/login` and whose agent has `fix/prompt`,
+/// as two pull requests would leave them. The frontend has neither.
+fn fixture_with_two_reviewable_branches() -> Fixture {
+    let fx = fixture_with_repos(&["frontend", "backend", "agent"]);
+    commit_on(&fx.remote_dir("backend"), "feat/login", "add login");
+    commit_on(&fx.remote_dir("agent"), "fix/prompt", "fix the prompt");
+    fx
+}
+
+/// Reviews the workspace `pr-backend-12` with the given branch for each named repo.
+fn review(fx: &Fixture, chosen: &[(&str, &str)]) -> Result<NewWorkspace> {
+    let chosen: HashMap<String, String> = chosen
+        .iter()
+        .map(|(repo, branch)| (repo.to_string(), branch.to_string()))
+        .collect();
+    review_workspace(
+        &fx.registry(),
+        PROJECT,
+        "pr-backend-12",
+        &chosen,
+        None,
+        false,
+    )
 }
 
 #[test]
@@ -405,6 +432,251 @@ fn a_workspace_is_not_shared_by_two_branches_whose_names_give_the_same_folder() 
     assert!(taken(checked_out));
     assert!(taken(created));
     assert!(!fx.workspace_dir("feat-login").join("backend").exists());
+}
+
+#[test]
+fn review_workspace_gives_each_repo_its_branch_and_the_others_one_from_the_base() {
+    let fx = fixture_with_two_reviewable_branches();
+
+    let workspace = review(&fx, &[("backend", "feat/login"), ("agent", "fix/prompt")]).unwrap();
+
+    assert_eq!(workspace.path, fx.workspace_dir("pr-backend-12"));
+    assert_eq!(workspace.tracked, ["backend", "agent"]);
+    assert_eq!(workspace.created, ["frontend"]);
+    for (repo, branch) in [("backend", "feat/login"), ("agent", "fix/prompt")] {
+        let worktree = workspace.path.join(repo);
+        assert_eq!(git(&worktree, &["branch", "--show-current"]), branch);
+        assert_eq!(head(&worktree, "HEAD"), head(&fx.remote_dir(repo), branch));
+        assert_eq!(
+            git(&worktree, &["rev-parse", "--abbrev-ref", "@{upstream}"]),
+            format!("origin/{branch}")
+        );
+    }
+    let frontend = workspace.path.join("frontend");
+    assert_eq!(
+        git(&frontend, &["branch", "--show-current"]),
+        "pr-backend-12"
+    );
+    assert_eq!(
+        head(&frontend, "HEAD"),
+        head(&fx.remote_dir("frontend"), "main")
+    );
+}
+
+#[test]
+fn review_workspace_refuses_a_branch_its_repo_does_not_have_and_creates_nothing() {
+    let fx = fixture_with_two_reviewable_branches();
+
+    let err = review(&fx, &[("backend", "feat/login"), ("agent", "feat/login")]).unwrap_err();
+
+    assert!(
+        matches!(&err, Error::BranchNotOnRemote { repo, branch }
+            if repo == "agent" && branch == "feat/login"),
+        "{err:?}"
+    );
+    assert!(!fx.workspace_dir("pr-backend-12").exists());
+    assert_eq!(git(&fx.cache_dir("backend"), &["branch", "--list"]), "");
+}
+
+#[test]
+fn review_workspace_needs_a_choice_and_only_for_repos_of_the_project() {
+    let fx = fixture_with_two_reviewable_branches();
+
+    let nothing = review(&fx, &[]).unwrap_err();
+    let unknown = review(&fx, &[("billing", "feat/login")]).unwrap_err();
+
+    assert!(matches!(nothing, Error::NothingToReview), "{nothing:?}");
+    assert!(
+        matches!(&unknown, Error::RepoNotFound(repo) if repo == "billing"),
+        "{unknown:?}"
+    );
+    assert!(!fx.workspace_dir("pr-backend-12").exists());
+}
+
+#[test]
+fn a_branch_lives_in_one_workspace_at_a_time() {
+    let fx = fixture_with_two_reviewable_branches();
+    let own = checkout_workspace(&fx.registry(), PROJECT, "fix/prompt", None, false)
+        .unwrap()
+        .path;
+
+    let reviewed = review(&fx, &[("agent", "fix/prompt")]).unwrap_err();
+    review(&fx, &[("backend", "feat/login")]).unwrap();
+    let checked_out =
+        checkout_workspace(&fx.registry(), PROJECT, "feat/login", None, false).unwrap_err();
+
+    assert!(
+        matches!(&reviewed, Error::BranchInUse { repo, branch, path }
+            if repo == "agent" && branch == "fix/prompt"
+                && path.canonicalize().unwrap() == own.join("agent").canonicalize().unwrap()),
+        "{reviewed:?}"
+    );
+    assert!(
+        matches!(&checked_out, Error::BranchInUse { repo, branch, .. }
+            if repo == "backend" && branch == "feat/login"),
+        "{checked_out:?}"
+    );
+    assert!(!fx.workspace_dir("feat-login").exists());
+}
+
+#[test]
+fn review_workspace_adds_the_worktrees_missing_from_an_existing_one() {
+    let fx = fixture_with_two_reviewable_branches();
+    let path = review(&fx, &[("backend", "feat/login")]).unwrap().path;
+    fs::remove_dir_all(path.join("backend")).unwrap();
+    fx.register(&fx.remote("billing"));
+
+    let workspace = review(&fx, &[("backend", "feat/login")]).unwrap();
+
+    assert_eq!(workspace.kept, ["frontend", "agent"]);
+    assert_eq!(workspace.restored, ["backend"]);
+    assert_eq!(workspace.created, ["billing"]);
+    assert_eq!(
+        git(&path.join("backend"), &["branch", "--show-current"]),
+        "feat/login"
+    );
+    assert_eq!(
+        git(&path.join("billing"), &["branch", "--show-current"]),
+        "pr-backend-12"
+    );
+}
+
+#[test]
+fn a_reviewed_workspace_is_pulled_and_removed_like_any_other() {
+    let fx = fixture_with_two_reviewable_branches();
+    let path = review(&fx, &[("backend", "feat/login")]).unwrap().path;
+    commit_on(&fx.remote_dir("backend"), "feat/login", "review comments");
+
+    let report = pull_workspace(&fx.home(), &fx.project(), "pr-backend-12").unwrap();
+    let outcomes: Vec<_> = report
+        .iter()
+        .map(|(_, result)| *result.as_ref().unwrap())
+        .collect();
+    assert_eq!(
+        outcomes,
+        [
+            PullOutcome::NoRemoteBranch,
+            PullOutcome::Updated,
+            PullOutcome::NoRemoteBranch
+        ]
+    );
+
+    commit_here(&path.join("backend"), "a fix of mine");
+    let err = remove_workspace(&fx.registry(), PROJECT, "pr-backend-12", false).unwrap_err();
+    assert!(
+        matches!(&err, Error::WorkspaceHasWork { reasons, .. }
+            if reasons == &["backend: 1 unpushed commit on `feat/login`"]),
+        "{err:?}"
+    );
+    remove_workspace(&fx.registry(), PROJECT, "pr-backend-12", true).unwrap();
+    assert!(!path.exists());
+    for repo in ["frontend", "backend", "agent"] {
+        assert_eq!(git(&fx.cache_dir(repo), &["branch", "--list"]), "");
+    }
+}
+
+#[test]
+fn a_review_is_remembered_so_any_command_completes_it_with_the_same_branches() {
+    let fx = fixture_with_two_reviewable_branches();
+    let path = review(&fx, &[("backend", "feat/login"), ("agent", "fix/prompt")])
+        .unwrap()
+        .path;
+    commit_here(&path.join("backend"), "a fix of mine");
+    let mine = head(&path.join("backend"), "HEAD");
+    fs::remove_dir_all(path.join("backend")).unwrap();
+    fs::remove_dir_all(path.join("frontend")).unwrap();
+
+    let listed = status(&fx.home(), &fx.project()).unwrap();
+    let workspace =
+        checkout_workspace(&fx.registry(), PROJECT, "pr-backend-12", None, false).unwrap();
+
+    assert_eq!(
+        listed.workspaces[0].branch.as_deref(),
+        Some("pr-backend-12")
+    );
+    assert_eq!(workspace.restored, ["frontend", "backend"]);
+    assert_eq!(workspace.kept, ["agent"]);
+    assert_eq!(
+        git(&path.join("backend"), &["branch", "--show-current"]),
+        "feat/login"
+    );
+    assert_eq!(head(&path.join("backend"), "HEAD"), mine);
+    assert_eq!(
+        git(&path.join("frontend"), &["branch", "--show-current"]),
+        "pr-backend-12"
+    );
+}
+
+#[test]
+fn a_workspace_reviews_what_it_was_made_for_and_nothing_else() {
+    let fx = fixture_with_two_reviewable_branches();
+    review(&fx, &[("backend", "feat/login")]).unwrap();
+    create_workspace(&fx.registry(), PROJECT, "work", None, false).unwrap();
+    let onto = |branch: &str, chosen: &[(&str, &str)]| {
+        let chosen = chosen
+            .iter()
+            .map(|(repo, branch)| (repo.to_string(), branch.to_string()))
+            .collect();
+        review_workspace(&fx.registry(), PROJECT, branch, &chosen, None, false).unwrap_err()
+    };
+
+    let more = review(&fx, &[("backend", "feat/login"), ("agent", "fix/prompt")]).unwrap_err();
+    let plain = onto("work", &[("agent", "fix/prompt")]);
+
+    assert!(
+        matches!(&more, Error::ReviewsOtherBranches { name, reviewed }
+            if name == "pr-backend-12" && reviewed == &["backend=feat/login"]),
+        "{more:?}"
+    );
+    assert!(
+        matches!(&plain, Error::WorkspaceExists { name, .. } if name == "work"),
+        "{plain:?}"
+    );
+    let agent = fx.workspace_dir("pr-backend-12").join("agent");
+    assert_eq!(git(&agent, &["branch", "--show-current"]), "pr-backend-12");
+    assert_eq!(fx.project().review("work"), None);
+}
+
+#[test]
+fn a_review_that_fails_is_not_remembered() {
+    let fx = fixture_with_two_reviewable_branches();
+
+    review(&fx, &[("backend", "feat/nope")]).unwrap_err();
+
+    assert!(fx.project().workspaces.is_empty());
+}
+
+#[test]
+fn removing_a_review_deletes_its_branches_even_after_its_folder_is_gone() {
+    let fx = fixture_with_two_reviewable_branches();
+    let path = review(&fx, &[("backend", "feat/login"), ("agent", "fix/prompt")])
+        .unwrap()
+        .path;
+    fs::remove_dir_all(&path).unwrap();
+
+    remove_workspace(&fx.registry(), PROJECT, "pr-backend-12", false).unwrap();
+
+    for repo in ["frontend", "backend", "agent"] {
+        assert_eq!(git(&fx.cache_dir(repo), &["branch", "--list"]), "");
+    }
+    assert!(fx.project().workspaces.is_empty());
+}
+
+#[test]
+fn remove_workspace_leaves_alone_a_branch_that_another_workspace_holds() {
+    let fx = fixture_with_two_reviewable_branches();
+    let path = review(&fx, &[("backend", "feat/login")]).unwrap().path;
+
+    let err = remove_workspace(&fx.registry(), PROJECT, "feat/login", true).unwrap_err();
+
+    assert!(
+        matches!(&err, Error::WorkspaceNotFound(branch) if branch == "feat/login"),
+        "{err:?}"
+    );
+    assert_eq!(
+        git(&path.join("backend"), &["branch", "--show-current"]),
+        "feat/login"
+    );
 }
 
 #[test]

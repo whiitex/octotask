@@ -629,3 +629,24 @@ fn the_run_command_of_a_repo_can_be_set_for_one_workspace() {
         set_workspace_run(&fx.registry(), PROJECT, "nope", "feat/login", Some("x")).unwrap_err();
     assert!(matches!(err, Error::RepoNotFound(_)), "{err:?}");
 }
+
+#[test]
+fn check_remote_branch_sees_what_was_pushed_since_the_last_fetch() {
+    let fx = Fixture::new();
+    fx.register(&fx.remote("backend"));
+    super::commit_on(&fx.remote_dir("backend"), "feat/login", "a teammate's work");
+    let check = |branch: &str| {
+        octotask_core::check_remote_branch(&fx.home(), &fx.project(), "backend", branch)
+    };
+
+    check("feat/login").unwrap();
+    let missing = check("feat/nope").unwrap_err();
+    let invalid = check("bad name").unwrap_err();
+
+    assert!(
+        matches!(&missing, Error::BranchNotOnRemote { repo, branch }
+            if repo == "backend" && branch == "feat/nope"),
+        "{missing:?}"
+    );
+    assert!(matches!(invalid, Error::InvalidName { .. }), "{invalid:?}");
+}

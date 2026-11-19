@@ -149,6 +149,48 @@ impl FakeRemote {
     }
 }
 
+/// The fake `gh` of `tests/fixtures`, which answers from a folder of pull requests.
+struct FakeGh {
+    tmp: TempDir,
+}
+
+impl FakeGh {
+    const DIR: &str = "FAKE_GH_DIR";
+
+    fn new() -> Self {
+        let gh = Self {
+            tmp: TempDir::new().unwrap(),
+        };
+        fs::create_dir_all(gh.bin_dir()).unwrap();
+        install(&gh.bin_dir().join("gh"), include_str!("../fixtures/gh"));
+        gh
+    }
+
+    fn bin_dir(&self) -> PathBuf {
+        self.tmp.path().join("bin")
+    }
+
+    /// An open pull request of `repo`, as `gh --json` prints it.
+    fn pull_request(&self, repo: &str, number: u64, json: &str) {
+        let dir = self.tmp.path().join("pull requests").join(repo);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(format!("{number}.json")), json).unwrap();
+    }
+
+    /// Runs the calling test again in a child that has the fake `gh` first on `PATH`.
+    fn run_in_child(&self, module: &str, test_name: &str) {
+        let mut path = OsString::from(self.bin_dir());
+        path.push(":");
+        path.push(env::var_os("PATH").unwrap_or_default());
+        let dir = self.tmp.path().join("pull requests");
+        run_in_child(
+            module,
+            test_name,
+            &[("PATH", path.as_os_str()), (Self::DIR, dir.as_os_str())],
+        );
+    }
+}
+
 /// In the child: a path the parent passed through the environment.
 fn fake_remote_path(var: &str) -> PathBuf {
     PathBuf::from(env::var_os(var).unwrap())

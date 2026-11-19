@@ -180,6 +180,26 @@ pub fn fetch_repos(home: &Home, project: &Project) -> Vec<(String, Result<()>)> 
         .collect()
 }
 
+/// Fails unless `branch` is a name git accepts and the remote of the repo `key` has it,
+/// as of a fetch made now.
+pub fn check_remote_branch(home: &Home, project: &Project, key: &str, branch: &str) -> Result<()> {
+    validate_branch(branch)?;
+    let repo = project
+        .repos
+        .get(key)
+        .ok_or_else(|| Error::RepoNotFound(key.to_string()))?;
+    let cache = Cache::of_repo(home, project, key, repo);
+    cache.fetch(&repo.url)?;
+    if cache.git().origin_branch_exists(branch)? {
+        Ok(())
+    } else {
+        Err(Error::BranchNotOnRemote {
+            repo: key.to_string(),
+            branch: branch.to_string(),
+        })
+    }
+}
+
 /// The dev changes saved for a repo where the project keeps it.
 pub(super) fn dev_store(home: &Home, project: &Project, key: &str) -> Store {
     let location = project.effective_location(&project.repos[key], None);

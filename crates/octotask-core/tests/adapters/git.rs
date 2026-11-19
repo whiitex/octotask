@@ -266,6 +266,30 @@ fn tracking_worktree_starts_at_the_remote_branch_and_follows_it() {
     );
 }
 
+#[test]
+fn worktree_of_branch_finds_where_a_branch_is_checked_out() {
+    let repo = TempDir::new().unwrap();
+    init_repo(repo.path());
+    commit_empty(repo.path());
+    let git = Git::new(repo.path());
+    let parent = TempDir::new().unwrap();
+    let worktree = parent.path().join("feature");
+    git.add_worktree(&worktree, "feat/login", "HEAD").unwrap();
+    git.run(&["branch", "feat/other"]).unwrap();
+
+    let found = git.worktree_of_branch("feat/login").unwrap();
+    assert_eq!(
+        found.map(|path| canonical(&path)),
+        Some(canonical(&worktree))
+    );
+    assert_eq!(git.worktree_of_branch("feat/other").unwrap(), None);
+    assert_eq!(git.worktree_of_branch("feat").unwrap(), None);
+
+    // git still lists a worktree whose folder is gone, until it is pruned.
+    std::fs::remove_dir_all(&worktree).unwrap();
+    assert_eq!(git.worktree_of_branch("feat/login").unwrap(), None);
+}
+
 /// An empty commit on a new `branch`, made at `date`.
 fn commit_on_new_branch(dir: &Path, branch: &str, date: &str) {
     git_setup(dir, &["checkout", "--quiet", "-b", branch]);

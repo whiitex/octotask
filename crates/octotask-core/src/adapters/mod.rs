@@ -9,7 +9,7 @@ mod ssh_config;
 mod utils;
 
 pub(crate) use files::Files;
-pub use gh::Gh;
+pub use gh::{Gh, PullRequest};
 pub use git::{Commit, Git, OriginBranches, origin_ref};
 pub(crate) use shell::{Commands, Lifeline, Supervised, run_script, supervise};
 pub use ssh::{Ssh, SshSettings, resolve_location};
