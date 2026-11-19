@@ -2,7 +2,7 @@ mod prompts;
 mod utils;
 
 use std::collections::HashMap;
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, Write};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,6 +16,7 @@ use octotask_core::{
     remove_workspace, resolve_location, review_workspace, save_dev_changes, set_project_location,
     set_workspace_run, start_workspace, status, unregister_repo, update_repo, workspace_name,
 };
+use serde_json::json;
 use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
 
@@ -24,9 +25,9 @@ use prompts::{
     ask_what_to_review,
 };
 use utils::{
-    LOCAL, confirm, print_dev_changes, print_dev_changes_json, print_new_workspace, print_projects,
-    print_pull_report, print_report, print_repos, print_status, print_up_event, repo_label,
-    up_labels,
+    LOCAL, Output, ProjectDocument, RepoDocument, Report, confirm, print_dev_changes,
+    print_fetch_report, print_projects, print_pull_report, print_repos, print_status,
+    print_up_event, print_usage_failure, print_workspace, repo_label, report_exit_code, up_labels,
 };
 
 /// Exit code of a command ended by Ctrl-C, as shells report it.
@@ -39,6 +40,10 @@ struct Cli {
     /// Project to act on (defaults to the one set with `octok project use`)
     #[arg(short, long, global = true)]
     project: Option<String>,
+
+    /// Print one JSON document on stdout instead of text, and never ask a question
+    #[arg(long, global = true)]
+    json: bool,
 
     #[command(subcommand)]
     command: Command,
@@ -122,10 +127,7 @@ enum Command {
     #[command(subcommand)]
     Pr(PrCommand),
     /// Show the project, its repos and the checkouts of every workspace
-    Status {
-        #[arg(long)]
-        json: bool,
-    },
+    Status,
     /// Type the passphrase of an ssh key once: `ssh-add` asks for it and keeps it
     SetSshPassphrase {
         /// Machine whose key to unlock (defaults to every other machine of the project)
@@ -146,10 +148,7 @@ enum ProjectCommand {
         location: Option<String>,
     },
     /// List projects
-    Ls {
-        #[arg(long)]
-        json: bool,
-    },
+    Ls,
     /// Set the default project
     Use { name: String },
     /// Change the settings of the project
@@ -186,8 +185,6 @@ enum DevCommand {
     Show {
         /// Keys or aliases of the repos (defaults to every repo of the project)
         repos: Vec<String>,
-        #[arg(long)]
-        json: bool,
     },
 }
 
@@ -275,10 +272,7 @@ enum RepoCommand {
         location: Option<String>,
     },
     /// List the project's repos
-    Ls {
-        #[arg(long)]
-        json: bool,
-    },
+    Ls,
     /// Change the alias, the base branch, the url, the location or the commands of a repo
     Set {
         /// Key or alias of the repo
@@ -376,36 +370,57 @@ fn optional_change<T>(value: Option<T>, clear: bool) -> Option<Option<T>> {
 }
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
-    match run(cli) {
-        Ok(code) => code,
-        Err(e) => {
-            eprintln!("error: {e}");
-            ExitCode::FAILURE
-        }
+    end_quietly_when_the_reader_goes_away();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(refusal) => return refuse_command_line(&refusal),
+    };
+    let out = Output::new(cli.json);
+    if cli.json {
+        Ssh::never_ask();
+    }
+    run(cli, out).unwrap_or_else(|error| out.failure(&error))
+}
+
+/// Rust ignores SIGPIPE, so printing to a pipe that was closed panics. With the default
+/// action octok ends as any command does in `octok status | head -1`.
+fn end_quietly_when_the_reader_goes_away() {
+    // SAFETY: the first thing `main` does, before any thread exists, and restoring the
+    // default action of a signal has no other effect on the process.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
 }
 
-fn run(cli: Cli) -> Result<ExitCode> {
+/// clap refuses a command line before `--json` is read, so the arguments are searched
+/// for it. Help and the version are not failures: they stay text.
+fn refuse_command_line(refusal: &clap::Error) -> ExitCode {
+    let wants_json = std::env::args()
+        .skip(1)
+        .take_while(|argument| argument != "--")
+        .any(|argument| argument == "--json" || argument.starts_with("--json="));
+    if wants_json && refusal.use_stderr() {
+        print_usage_failure(&refusal.render().to_string())
+    } else {
+        refusal.exit()
+    }
+}
+
+fn run(cli: Cli, out: Output) -> Result<ExitCode> {
     let registry = Registry::new(Home::from_env()?);
     let explicit_project = cli.project.as_deref();
     let resolve_project = || registry.resolve_project(explicit_project);
     match cli.command {
         Command::Project(ProjectCommand::Set { changes }) => {
-            return set_project(&registry, &resolve_project()?, &changes);
+            return set_project(&registry, &resolve_project()?, &changes, out);
         }
-        Command::SetSshPassphrase { host: Some(host) } => remember_passphrases(&[host])?,
-        Command::SetSshPassphrase { host: None } => {
-            let project = registry.load_project(&resolve_project()?)?;
-            let hosts = remote_hosts(&project);
-            if hosts.is_empty() {
-                println!("project `{}` has no repo on another machine", project.name);
-            }
-            remember_passphrases(&hosts)?;
+        Command::SetSshPassphrase { host } => {
+            out.needs_terminal("octok set-ssh-passphrase")?;
+            set_ssh_passphrase(&registry, host, resolve_project)?;
         }
-        Command::Project(cmd) => project(&registry, cmd)?,
-        Command::Repo(cmd) => repo(&registry, &resolve_project()?, cmd)?,
-        Command::Fetch => return fetch(&registry, &resolve_project()?),
+        Command::Project(cmd) => project(&registry, cmd, out)?,
+        Command::Repo(cmd) => repo(&registry, &resolve_project()?, cmd, out)?,
+        Command::Fetch => return fetch(&registry, &resolve_project()?, out),
         Command::Branch {
             name: branch,
             location,
@@ -415,8 +430,9 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 branch: &branch,
                 location: location.as_deref(),
                 allow_stale_dev,
+                open: create_workspace,
             };
-            open(&registry, &resolve_project()?, create_workspace, &workspace)?
+            open(&registry, &resolve_project()?, &workspace, out)?
         }
         Command::Checkout {
             create,
@@ -424,25 +440,30 @@ fn run(cli: Cli) -> Result<ExitCode> {
             location,
             allow_stale_dev,
         } => {
-            let open_workspace: OpenWorkspace = if create {
-                create_workspace
-            } else {
-                checkout_workspace
-            };
             let workspace = WorkspaceRequest {
                 branch: &branch,
                 location: location.as_deref(),
                 allow_stale_dev,
+                open: if create {
+                    create_workspace
+                } else {
+                    checkout_workspace
+                },
             };
-            open(&registry, &resolve_project()?, open_workspace, &workspace)?
+            open(&registry, &resolve_project()?, &workspace, out)?
         }
         Command::Rm { force, branch } => {
             let project_name = resolve_project()?;
             let name = remove_workspace(&registry, &project_name, &branch, force)?;
-            println!("removed workspace `{name}` from {project_name}");
+            let document = json!({"project": project_name, "removed": name});
+            out.result(&document, |_| {
+                println!("removed workspace `{name}` from {project_name}");
+            });
         }
-        Command::Pr(PrCommand::Review(args)) => review(&registry, &resolve_project()?, &args)?,
-        Command::Pull { branch } => return pull(&registry, explicit_project, branch.as_deref()),
+        Command::Pr(PrCommand::Review(args)) => review(&registry, &resolve_project()?, &args, out)?,
+        Command::Pull { branch } => {
+            return pull(&registry, explicit_project, branch.as_deref(), out);
+        }
         Command::Dev(DevCommand::Save {
             repos,
             files,
@@ -454,29 +475,25 @@ fn run(cli: Cli) -> Result<ExitCode> {
             let project = registry.load_project(&project_name)?;
             let (repos, files) = (as_strs(&repos), as_strs(&files));
             let saved = save_dev_changes(registry.home(), &project, &workspace, &repos, &files)?;
-            print_dev_changes(&project, &saved, false);
+            print_dev_changes(out, &project, &saved, false);
         }
-        Command::Dev(DevCommand::Show { repos, json }) => {
+        Command::Dev(DevCommand::Show { repos }) => {
             let project = registry.load_project(&resolve_project()?)?;
             let saved = dev_changes(registry.home(), &project, &as_strs(&repos))?;
-            if json {
-                print_dev_changes_json(&project, &saved);
-            } else {
-                print_dev_changes(&project, &saved, true);
-            }
+            print_dev_changes(out, &project, &saved, true);
         }
         Command::Up { repos, branch } => {
-            return up(&registry, explicit_project, branch.as_deref(), &repos);
+            return up(&registry, explicit_project, branch.as_deref(), &repos, out);
         }
-        Command::Status { json } => {
+        Command::Status => {
             let project = registry.load_project(&resolve_project()?)?;
-            print_status(&status(registry.home(), &project)?, json);
+            out.result(&status(registry.home(), &project)?, print_status);
         }
     }
     Ok(ExitCode::SUCCESS)
 }
 
-fn project(registry: &Registry, cmd: ProjectCommand) -> Result<()> {
+fn project(registry: &Registry, cmd: ProjectCommand, out: Output) -> Result<()> {
     match cmd {
         ProjectCommand::Init {
             name,
@@ -486,7 +503,7 @@ fn project(registry: &Registry, cmd: ProjectCommand) -> Result<()> {
             refuse_unusable_project_name(registry, &name)?;
             let mut location = resolve_optional_location(location.as_deref())?;
             let mut base = base;
-            if io::stdin().is_terminal() {
+            if out.may_ask() {
                 if base.is_none() {
                     base = ask_project_base(&name)?;
                 }
@@ -496,41 +513,48 @@ fn project(registry: &Registry, cmd: ProjectCommand) -> Result<()> {
             }
             let base = base.unwrap_or_else(|| DEFAULT_BASE.to_string());
             registry.init_project(&name, &base)?;
-            println!(
+            out.note(format_args!(
                 "created project `{name}` (base: {base}) at {}",
                 registry.home().project_file(&name).display()
-            );
+            ));
             if let Some(location) = location {
-                println!("its repos live at {location}");
+                out.note(format_args!("its repos live at {location}"));
                 registry.update_project(&name, |project| {
                     project.set_location(Some(location));
                     Ok(())
                 })?;
             }
-            println!("`{name}` is now the default project");
+            out.result(&ProjectDocument::read(registry, &name)?, |_| {
+                println!("`{name}` is now the default project");
+            });
         }
-        ProjectCommand::Ls { json } => {
+        ProjectCommand::Ls => {
             let projects = registry.list_projects()?;
             let default = registry.default_project()?;
-            print_projects(&projects, default.as_deref(), json);
+            print_projects(out, &projects, default.as_deref());
         }
         ProjectCommand::Use { name } => {
             registry.set_default_project(&name)?;
-            println!("default project: {name}");
+            out.result(&json!({"default": name}), |_| {
+                println!("default project: {name}");
+            });
         }
         ProjectCommand::Set { .. } => unreachable!("handled by `run`, which knows the project"),
         ProjectCommand::Rm { force, name } => {
             remove_project(registry, &name, force)?;
-            println!("removed project `{name}`");
-            if registry.default_project()?.is_none() {
-                println!("no default project: choose one with `octok project use <name>`");
-            }
+            let default = registry.default_project()?;
+            out.result(&json!({"removed": name, "default": default}), |_| {
+                println!("removed project `{name}`");
+                if default.is_none() {
+                    println!("no default project: choose one with `octok project use <name>`");
+                }
+            });
         }
     }
     Ok(())
 }
 
-fn repo(registry: &Registry, project_name: &str, cmd: RepoCommand) -> Result<()> {
+fn repo(registry: &Registry, project_name: &str, cmd: RepoCommand, out: Output) -> Result<()> {
     match cmd {
         RepoCommand::Add {
             url,
@@ -545,16 +569,14 @@ fn repo(registry: &Registry, project_name: &str, cmd: RepoCommand) -> Result<()>
                 base,
                 location: resolve_optional_location(location.as_deref())?,
             };
-            let at_terminal = io::stdin().is_terminal();
+            let may_ask = out.may_ask();
             let project = registry.load_project(project_name)?;
-            if at_terminal {
+            if may_ask {
                 ask_repo_settings(&project, &url, &mut settings)?;
             }
             // Asked once the repo is cloned, when its branches and their dates are known.
             let choose_base = |_key: &str, branches: &OriginBranches| {
-                at_terminal
-                    .then(|| ask_repo_base(&project, branches))
-                    .flatten()
+                may_ask.then(|| ask_repo_base(&project, branches)).flatten()
             };
             let repo = NewRepo {
                 url: &url,
@@ -567,24 +589,30 @@ fn repo(registry: &Registry, project_name: &str, cmd: RepoCommand) -> Result<()>
                 registry,
                 project_name,
                 &repo,
-                confirm_missing_base,
+                confirm_missing_base(out),
                 choose_base,
             )?;
-            let label = repo_label(&key, settings.alias.as_deref());
-            println!("added `{label}` to {project_name}: {url}");
             let project = registry.load_project(project_name)?;
-            let location = project.effective_location(&project.repos[&key], None);
-            if *location != Location::Local {
-                println!("cloned at {location}");
-            }
+            out.result(&RepoDocument::new(&project, None, &key), |_| {
+                let label = repo_label(&key, settings.alias.as_deref());
+                println!("added `{label}` to {project_name}: {url}");
+                let location = project.effective_location(&project.repos[&key], None);
+                if *location != Location::Local {
+                    println!("cloned at {location}");
+                }
+            });
         }
-        RepoCommand::Ls { json } => print_repos(&registry.load_project(project_name)?, json),
+        RepoCommand::Ls => print_repos(out, &registry.load_project(project_name)?),
         RepoCommand::Set { repo, changes } => {
             if let Some(branch) = &changes.branch {
                 let run = changes.run.as_deref();
                 let key = set_workspace_run(registry, project_name, &repo, branch, run)?;
                 let workspace = workspace_name(branch);
-                println!("updated `{key}` in workspace `{workspace}` of {project_name}");
+                let project = registry.load_project(project_name)?;
+                let document = RepoDocument::new(&project, Some(&workspace), &key);
+                out.result(&document, |_| {
+                    println!("updated `{key}` in workspace `{workspace}` of {project_name}");
+                });
                 return Ok(());
             }
             let location = resolve_optional_location(changes.location.as_deref())?;
@@ -593,15 +621,19 @@ fn repo(registry: &Registry, project_name: &str, cmd: RepoCommand) -> Result<()>
                 project_name,
                 &repo,
                 &changes.changes(location.as_ref()),
-                confirm_missing_base,
+                confirm_missing_base(out),
             )?;
             let project = registry.load_project(project_name)?;
-            let label = repo_label(&key, project.repos[&key].alias.as_deref());
-            println!("updated `{label}` in {project_name}");
+            out.result(&RepoDocument::new(&project, None, &key), |_| {
+                let label = repo_label(&key, project.repos[&key].alias.as_deref());
+                println!("updated `{label}` in {project_name}");
+            });
         }
         RepoCommand::Rm { key } => {
             let key = unregister_repo(registry, project_name, &key)?;
-            println!("removed `{key}` from {project_name}");
+            out.result(&json!({"project": project_name, "removed": key}), |_| {
+                println!("removed `{key}` from {project_name}");
+            });
         }
     }
     Ok(())
@@ -611,27 +643,38 @@ fn set_project(
     registry: &Registry,
     project_name: &str,
     changes: &ProjectSetArgs,
+    out: Output,
 ) -> Result<ExitCode> {
     if let Some(base) = &changes.base {
         set_project_base(registry, project_name, base)?;
+        out.note(format_args!("base of `{project_name}` is now `{base}`"));
     }
-    if changes.location.is_none() && !changes.no_location {
-        return Ok(ExitCode::SUCCESS);
+    let mut cloned_again = None;
+    if changes.location.is_some() || changes.no_location {
+        let location = resolve_optional_location(changes.location.as_deref())?;
+        let shown = location.clone().unwrap_or(Location::Local);
+        set_project_location(registry, project_name, location)?;
+        out.note(format_args!(
+            "repos of `{project_name}` now live at {shown}"
+        ));
+        // The caches of the repos that moved are gone: clone them where they live now.
+        let project = registry.load_project(project_name)?;
+        cloned_again = Some(fetch_repos(registry.home(), &project));
     }
-    let location = resolve_optional_location(changes.location.as_deref())?;
-    let shown = location.clone().unwrap_or(Location::Local);
-    set_project_location(registry, project_name, location)?;
-    println!("repos of `{project_name}` now live at {shown}");
-    // The caches of the repos that moved are gone: clone them where they live now.
-    fetch(registry, project_name)
+    let mut document = ProjectDocument::read(registry, project_name)?;
+    document.repos = cloned_again;
+    let report = document.repos.as_deref().unwrap_or_default();
+    let project = registry.load_project(project_name)?;
+    out.result(&document, |_| print_fetch_report(&project, report));
+    Ok(report_exit_code(report))
 }
 
+/// Warns on stderr about the repos whose remote lacks the new base.
 fn set_project_base(registry: &Registry, project_name: &str, base: &str) -> Result<()> {
     let project = registry.update_project(project_name, |project| {
         project.set_base(base)?;
         Ok(project.clone())
     })?;
-    println!("base of `{project_name}` is now `{base}`");
     // From the last fetch, without the network: enough for a hint.
     let without_base: Vec<String> = status(registry.home(), &project)?
         .repos
@@ -648,10 +691,17 @@ fn set_project_base(registry: &Registry, project_name: &str, base: &str) -> Resu
     Ok(())
 }
 
-fn fetch(registry: &Registry, project_name: &str) -> Result<ExitCode> {
+fn fetch(registry: &Registry, project_name: &str, out: Output) -> Result<ExitCode> {
     let project = registry.load_project(project_name)?;
-    let report = fetch_repos(registry.home(), &project);
-    Ok(print_report(&project, report, |()| "fetched".to_string()))
+    let report = Report {
+        project: &project.name,
+        workspace: None,
+        repos: fetch_repos(registry.home(), &project),
+    };
+    out.result(&report, |report| {
+        print_fetch_report(&project, &report.repos)
+    });
+    Ok(report_exit_code(&report.repos))
 }
 
 /// What `octok branch` and `octok checkout` ask for.
@@ -659,28 +709,28 @@ struct WorkspaceRequest<'a> {
     branch: &'a str,
     location: Option<&'a str>,
     allow_stale_dev: bool,
+    open: OpenWorkspace,
 }
 
 /// `create_workspace` for a new branch, `checkout_workspace` for one that exists.
 type OpenWorkspace = fn(&Registry, &str, &str, Option<&Location>, bool) -> Result<NewWorkspace>;
 
-/// Prints only the path on stdout, so `cd "$(octok branch <name>)"` works.
 fn open(
     registry: &Registry,
     project_name: &str,
-    open_workspace: OpenWorkspace,
     request: &WorkspaceRequest,
+    out: Output,
 ) -> Result<()> {
     let location = resolve_optional_location(request.location)?;
-    let workspace = open_workspace(
+    let workspace = (request.open)(
         registry,
         project_name,
         request.branch,
         location.as_ref(),
         request.allow_stale_dev,
     )?;
-    print_new_workspace(project_name, &workspace_name(request.branch), &workspace);
-    println!("{}", workspace.path.display());
+    let name = workspace_name(request.branch);
+    print_workspace(out, project_name, &name, &workspace);
     Ok(())
 }
 
@@ -697,8 +747,7 @@ struct Reviewed {
     pull_request: Option<u64>,
 }
 
-/// Prints only the path on stdout, like `octok checkout`.
-fn review(registry: &Registry, project_name: &str, args: &ReviewArgs) -> Result<()> {
+fn review(registry: &Registry, project_name: &str, args: &ReviewArgs, out: Output) -> Result<()> {
     let project = registry.load_project(project_name)?;
     if project.repos.is_empty() {
         return Err(Error::NoRepos(project.name));
@@ -714,7 +763,7 @@ fn review(registry: &Registry, project_name: &str, args: &ReviewArgs) -> Result<
             .into_iter()
             .map(|(key, pick)| reviewed_pick(&gh, &project, key, &pick))
             .collect::<Result<_>>()?
-    } else if io::stdin().is_terminal() {
+    } else if out.may_ask() {
         reviewed_from_terminal(registry.home(), &project, &gh)?
     } else {
         Vec::new()
@@ -739,8 +788,7 @@ fn review(registry: &Registry, project_name: &str, args: &ReviewArgs) -> Result<
         location.as_ref(),
         args.allow_stale_dev,
     )?;
-    print_new_workspace(project_name, &workspace_name(&branch), &workspace);
-    println!("{}", workspace.path.display());
+    print_workspace(out, project_name, &workspace_name(&branch), &workspace);
     Ok(())
 }
 
@@ -842,20 +890,29 @@ fn pull(
     registry: &Registry,
     explicit_project: Option<&str>,
     branch: Option<&str>,
+    out: Output,
 ) -> Result<ExitCode> {
     let (project_name, workspace) =
         target_workspace(registry, explicit_project, branch, "octok pull <branch>")?;
     let project = registry.load_project(&project_name)?;
-    let report = pull_workspace(registry.home(), &project, &workspace)?;
-    Ok(print_pull_report(&project, report))
+    let report = Report {
+        project: &project.name,
+        workspace: Some(&workspace),
+        repos: pull_workspace(registry.home(), &project, &workspace)?,
+    };
+    out.result(&report, |report| print_pull_report(&project, &report.repos));
+    Ok(report_exit_code(&report.repos))
 }
 
 /// Stays attached until every command has ended. Ctrl-C stops them all.
+///
+/// With `--json` every event is a document on its own line, after one that says what started.
 fn up(
     registry: &Registry,
     explicit_project: Option<&str>,
     branch: Option<&str>,
     repos: &[String],
+    out: Output,
 ) -> Result<ExitCode> {
     let usage = "octok up --branch <branch>";
     let (project_name, workspace) = target_workspace(registry, explicit_project, branch, usage)?;
@@ -863,8 +920,17 @@ fn up(
     let running = start_workspace(registry.home(), &project, &workspace, &as_strs(repos))?;
     let interrupted = stop_on_signal(running.stopper());
     let labels = up_labels(&project, running.started());
+    let started = json!({
+        "event": "started",
+        "project": project_name,
+        "workspace": workspace,
+        "repos": running.started().collect::<Vec<_>>(),
+    });
+    out.result(&started, |_| {});
     let all_succeeded = running.wait(|event| {
-        print_up_event(&labels, event, interrupted.load(Ordering::SeqCst));
+        out.result(&event, |event| {
+            print_up_event(&labels, *event, interrupted.load(Ordering::SeqCst));
+        });
     });
     Ok(if interrupted.load(Ordering::SeqCst) {
         ExitCode::from(INTERRUPTED)
@@ -946,6 +1012,26 @@ fn remote_hosts(project: &Project) -> Vec<String> {
     hosts
 }
 
+/// Unlocks the key of `host`, or of every other machine of the project.
+fn set_ssh_passphrase(
+    registry: &Registry,
+    host: Option<String>,
+    resolve_project: impl FnOnce() -> Result<String>,
+) -> Result<()> {
+    let hosts = match host {
+        Some(host) => vec![host],
+        None => {
+            let project = registry.load_project(&resolve_project()?)?;
+            let hosts = remote_hosts(&project);
+            if hosts.is_empty() {
+                println!("project `{}` has no repo on another machine", project.name);
+            }
+            hosts
+        }
+    };
+    remember_passphrases(&hosts)
+}
+
 /// `ssh-add` asks for each passphrase at the terminal: octok never sees it.
 fn remember_passphrases(hosts: &[String]) -> Result<()> {
     for host in hosts {
@@ -960,13 +1046,17 @@ fn remember_passphrases(hosts: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// Asks only at a terminal: scripts and agents get the error instead of a question nobody answers.
-fn confirm_missing_base(repo: &str, base: &str) -> bool {
-    let stdin = io::stdin();
-    stdin.is_terminal()
-        && confirm(
-            &format!("branch `{base}` is not on the remote of `{repo}`.\nUse it as base anyway?"),
-            stdin.lock(),
-            io::stderr(),
-        )
+/// Asks only a person at a terminal: scripts and agents get the error instead of a
+/// question nobody answers.
+fn confirm_missing_base(out: Output) -> impl FnOnce(&str, &str) -> bool {
+    move |repo, base| {
+        out.may_ask()
+            && confirm(
+                &format!(
+                    "branch `{base}` is not on the remote of `{repo}`.\nUse it as base anyway?"
+                ),
+                io::stdin().lock(),
+                io::stderr(),
+            )
+    }
 }

@@ -5,6 +5,7 @@ use serde::Serialize;
 
 use super::cache::{Cache, orphan_caches};
 use super::dev::Store;
+use super::repos::RepoResult;
 use crate::adapters::{Files, origin_ref};
 use crate::config::validate_branch;
 use crate::{Commit, Error, Git, Home, Location, Project, Registry, Repo, Result};
@@ -57,26 +58,55 @@ pub struct Checkout {
     /// `None` when the worktree cannot be read.
     pub commit: Option<Commit>,
     /// Why the worktree cannot be read, e.g. its cache is gone.
-    pub error: Option<String>,
+    pub error: Option<Error>,
 }
 
 /// What `create_workspace` did for each repo.
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct NewWorkspace {
+    /// The folder of the workspace: the one on this machine when it has one here.
     pub path: PathBuf,
-    /// Repos that got a new branch from their base.
-    pub created: Vec<String>,
-    /// Repos that got the branch their remote already had.
-    pub tracked: Vec<String>,
-    /// Repos whose branch was still in the cache, e.g. after the folder was deleted by hand.
-    pub restored: Vec<String>,
-    /// Repos whose worktree was already there.
-    pub kept: Vec<String>,
-    /// The worktrees on other machines, by repo, written `<host>:<path>`.
-    pub remote_worktrees: Vec<(String, PathBuf)>,
+    /// Every repo of the workspace, in the order of the project.
+    pub repos: Vec<NewCheckout>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The checkout of one repo in a workspace that was just opened.
+#[derive(Debug, Serialize)]
+pub struct NewCheckout {
+    pub key: String,
+    /// The worktree, written `<host>:<path>` when it is on another machine.
+    pub path: PathBuf,
+    pub outcome: CheckoutOutcome,
+    #[serde(skip)]
+    pub on_another_machine: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckoutOutcome {
+    /// The repo got a new branch from its base.
+    Created,
+    /// The repo got the branch its remote already had.
+    Tracked,
+    /// The branch was still in the cache, e.g. after the folder was deleted by hand.
+    Restored,
+    /// The worktree was already there.
+    Kept,
+}
+
+impl NewWorkspace {
+    /// Keys of the repos whose checkout has this outcome.
+    pub fn repos_with(&self, outcome: CheckoutOutcome) -> Vec<&str> {
+        self.repos
+            .iter()
+            .filter(|repo| repo.outcome == outcome)
+            .map(|repo| repo.key.as_str())
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PullOutcome {
     Updated,
     UpToDate,
@@ -485,10 +515,13 @@ pub fn pull_workspace(
     home: &Home,
     project: &Project,
     workspace: &str,
-) -> Result<Vec<(String, Result<PullOutcome>)>> {
+) -> Result<Vec<RepoResult<PullOutcome>>> {
     let report = members_of_existing(home, project, workspace)?
         .iter()
-        .map(|member| (member.key.to_string(), pull_worktree(member)))
+        .map(|member| RepoResult {
+            key: member.key.to_string(),
+            result: pull_worktree(member),
+        })
         .collect();
     Ok(report)
 }
@@ -912,28 +945,21 @@ fn undo_worktrees(added: &[Planned], folders: &[Folder]) {
 }
 
 fn new_workspace(path: PathBuf, plan: Plan) -> NewWorkspace {
-    let mut workspace = NewWorkspace {
-        path,
-        created: Vec::new(),
-        tracked: Vec::new(),
-        restored: Vec::new(),
-        kept: Vec::new(),
-        remote_worktrees: Vec::new(),
+    let checkout = |Planned { member, step, .. }: Planned| NewCheckout {
+        key: member.key.to_string(),
+        path: member.shown_worktree(),
+        outcome: match step {
+            Step::Keep => CheckoutOutcome::Kept,
+            Step::Restore => CheckoutOutcome::Restored,
+            Step::Create { .. } => CheckoutOutcome::Created,
+            Step::Track => CheckoutOutcome::Tracked,
+        },
+        on_another_machine: member.location != Location::Local,
     };
-    for Planned { member, step, .. } in plan {
-        let key = member.key.to_string();
-        if member.location != Location::Local {
-            let worktree = (key.clone(), member.shown_worktree());
-            workspace.remote_worktrees.push(worktree);
-        }
-        match step {
-            Step::Keep => workspace.kept.push(key),
-            Step::Restore => workspace.restored.push(key),
-            Step::Create { .. } => workspace.created.push(key),
-            Step::Track => workspace.tracked.push(key),
-        }
+    NewWorkspace {
+        path,
+        repos: plan.into_iter().map(checkout).collect(),
     }
-    workspace
 }
 
 /// What removing a workspace touches in one repo.
@@ -1158,7 +1184,7 @@ fn checkout(member: &Member) -> Option<Checkout> {
     let (branch, on_remote, commit, error) = match read {
         Ok(None) => return None,
         Ok(Some((branch, on_remote, commit))) => (branch, on_remote, Some(commit), None),
-        Err(error) => (None, false, None, Some(error.to_string())),
+        Err(error) => (None, false, None, Some(error)),
     };
     Some(Checkout {
         repo: member.key.to_string(),

@@ -102,8 +102,7 @@ Set the `OCTOTASK_HOME` environment variable to use another folder.
 Every command acts on the default project.
 Pass `-p <project>` to act on another one, for example `octok -p shop status`.
 
-Commands that list data also accept `--json`, for scripts and agents.
-Every JSON output carries `"schema": 1`.
+Every command also accepts `--json`, for scripts and agents: see [JSON output and exit codes](#json-output-and-exit-codes).
 
 ### Projects: `octok project`
 
@@ -112,7 +111,7 @@ A project is a named group of repositories with a default base branch.
 | Command | What it does |
 |---|---|
 | `octok project init <name> [--base <branch>] [--location <location>]` | Creates a project and makes it the default. The base branch defaults to `staging`, the location to this machine. |
-| `octok project ls [--json]` | Lists the projects and marks the default one with `*`. |
+| `octok project ls` | Lists the projects and marks the default one with `*`. |
 | `octok project use <name>` | Sets the default project. |
 | `octok project set --base <branch>` | Changes the base branch of the project, and warns about the repositories that do not have it. |
 | `octok project set --location <location>` | Changes the machine where the repositories of the project live. `--no-location` goes back to this machine. |
@@ -127,7 +126,7 @@ A repository can also have a shorter **alias**, accepted wherever the key is.
 | Command | What it does |
 |---|---|
 | `octok repo add <url> [--name <key>] [--alias <alias>] [--base <branch>] [--location <location>]` | Registers a repository and clones it into the cache. `--name` replaces the key, which is needed when two repositories have the same name. `--base` and `--location` override the base branch and the location of the project for this repository. |
-| `octok repo ls [--json]` | Lists the repositories with their base branch and URL, and their location when one of them is on another machine. |
+| `octok repo ls` | Lists the repositories with their base branch and URL, and their location when one of them is on another machine. |
 | `octok repo set <repo> --alias <alias>` | Sets or changes the alias. `--no-alias` removes it. |
 | `octok repo set <repo> --base <branch>` | Changes the base branch. `--no-base` goes back to the base branch of the project. |
 | `octok repo set <repo> --url <url>` | Changes the URL and fetches the clone from it. |
@@ -174,7 +173,7 @@ cloned at api-dev-1:/home/ubuntu/.octotask
 - A location on another machine is tried at once, and `octok` shows the user, the address, the port and the key files `ssh` uses for it.
 - The base branch is asked once the repository is cloned, after a list of the branches of its remote:
   the default branch first, then the staging branch under the names teams use for it (`staging`, `stage`, `stg`, `develop`, `development`, `dev`, `next`, `integration`, `preprod`, `pre-prod`), then the 5 other branches with the most recent commits.
-- With every flag given, or without a terminal, nothing is asked.
+- With every flag given, with `--json`, or without a terminal, nothing is asked.
 
 ### Workspaces: `octok branch`, `octok checkout`, `octok rm`
 
@@ -348,7 +347,7 @@ In a script or under an agent nobody can type a passphrase or accept a host key,
 | `octok pull [<branch>]` | Fetches, then fast-forwards each checkout of a workspace to its remote branch. Without `<branch>`, it uses the workspace of the current folder. |
 
 Both commands print one line per repository and keep going when one of them fails.
-They exit with code 1 if any repository failed.
+They exit with code 6 if any repository failed.
 
 `octok pull` only fast-forwards: it never merges, rebases or resets.
 A checkout whose branch has diverged from the remote, is not on the remote yet or is on a detached HEAD is skipped and reported.
@@ -400,7 +399,7 @@ Save them once, and every new workspace gets them, while git never sees them.
 | Command | What it does |
 |---|---|
 | `octok dev save [<repo>...] [--file <path>]... [--branch <branch>]` | Saves the dev changes of a workspace from its checkouts, replacing the ones saved before. Without `<repo>`, it saves every repository. Without `--branch`, it uses the workspace of the current folder. |
-| `octok dev show [<repo>...] [--json]` | Shows what is saved for each repository: the files, and the changes to the tracked ones. |
+| `octok dev show [<repo>...]` | Shows what is saved for each repository: the files, and the changes to the tracked ones. |
 | `octok branch <branch> --allow-stale-dev` | Creates a workspace even when some dev changes no longer apply. See below. |
 
 ```console
@@ -442,12 +441,50 @@ $ grep port main.py                    # the new workspace has them
 
 ### Overview: `octok status`
 
-`octok status [--json]` shows the state of the project.
+`octok status` shows the state of the project.
 It does not contact the git remotes, and it connects over `ssh` only to the other machines of the project:
 
 - every repository, with its base branch and the last commit of that branch at the last fetch;
 - every workspace, with the branch and the last commit of each checkout, marked `[not on the remote]` when the branch was not on the remote at the last fetch;
 - the problems it finds: a repository that was never fetched, a base branch missing on the remote, a repository with no checkout in a workspace, a checkout that cannot be read, and clones left behind by repositories that are no longer in the project.
+
+## JSON output and exit codes
+
+Add `--json` to any command, before or after it, to get its result as JSON instead of text.
+
+```console
+$ octok branch feat/login --json
+{"schema":1,"project":"shop","workspace":"feat-login","path":"/Users/you/.octotask/workspaces/shop/feat-login","repos":[{"key":"shop-frontend","path":"/Users/you/.octotask/workspaces/shop/feat-login/shop-frontend","outcome":"created"},{"key":"shop-backend","path":"/Users/you/.octotask/workspaces/shop/feat-login/shop-backend","outcome":"created"}]}
+
+$ octok rm feat/login --json
+{"schema":1,"error":{"code":"workspace_has_work","message":"workspace `feat-login` has work that would be lost:\n  shop-backend: 1 unpushed commit on `feat/login`\nremove it anyway with `octok rm --force <branch>`","workspace":"feat-login","reasons":["shop-backend: 1 unpushed commit on `feat/login`"]}}
+```
+
+- **One document.** A command prints one JSON document on one line of stdout, with `"schema": 1`, and nothing else on stdout.
+  `octok up` prints one document per event instead: what started, every line a repository prints, and how each repository ended.
+- **Failures.** A command that fails prints a document with an `error`: a `code` that never changes for that kind of error, the message, and what the error is about.
+- **No questions.** With `--json`, `octok` never asks anything, even at a terminal, and `ssh` never asks either.
+  `octok set-ssh-passphrase` is refused: it only works by asking.
+- **stderr.** It still carries the progress of git and the warnings, for people.
+- **Secrets.** The files that git does not track are only named, and the documents about a repository leave out its run and setup commands. Only `octok up` shows them, as it does in text.
+
+When the reader of its output goes away, as in `octok status | head -1`, `octok` ends quietly, like other commands.
+
+The exit code says which kind of failure happened, with and without `--json`:
+
+| Code | Meaning |
+|---|---|
+| 0 | The command did what it was asked. |
+| 1 | Another error, such as a git command that failed. |
+| 2 | The command is not written the way `octok` takes it: an unknown option, a name that is not valid, no project given. |
+| 3 | Something the command names is not there: a project, a repository, a branch, a workspace. |
+| 4 | Refused, because it would lose work that exists nowhere else. |
+| 5 | Refused, because it conflicts with what exists: already there, in use, or no longer applies. |
+| 6 | The command went through the repositories one by one, and at least one failed. |
+| 7 | Another machine or a program cannot be reached. |
+| 130 | `octok up` was stopped. |
+
+The document of every command and the list of the error codes are in [skills/octotask/references/json-output.md](skills/octotask/references/json-output.md).
 
 ## Development
 

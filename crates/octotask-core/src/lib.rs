@@ -14,13 +14,13 @@ pub use adapters::{
 pub use config::{
     Location, Project, Registry, Repo, WorkspaceRepo, WorkspaceSettings, repo_key_from_url,
 };
-pub use error::{Error, Result};
+pub use error::{Error, ErrorKind, Result};
 pub use home::Home;
 pub use workspaces::{
-    Checkout, DevChanges, NewRepo, NewWorkspace, PullOutcome, RepoChanges, RepoStatus, Running,
-    Status, Stopper, UpEvent, WorkspaceStatus, check_remote_branch, checkout_workspace,
-    create_workspace, dev_changes, fetch_repos, locate_workspace, pull_workspace, register_repo,
-    remove_project, remove_workspace, review_workspace, save_dev_changes, set_project_location,
-    set_workspace_run, start_workspace, status, unregister_repo, update_repo, workspace_name,
-    workspace_path,
+    Checkout, CheckoutOutcome, DevChanges, FetchOutcome, NewCheckout, NewRepo, NewWorkspace,
+    PullOutcome, RepoChanges, RepoResult, RepoStatus, Running, Status, Stopper, UpEvent,
+    WorkspaceStatus, check_remote_branch, checkout_workspace, create_workspace, dev_changes,
+    fetch_repos, locate_workspace, pull_workspace, register_repo, remove_project, remove_workspace,
+    review_workspace, save_dev_changes, set_project_location, set_workspace_run, start_workspace,
+    status, unregister_repo, update_repo, workspace_name, workspace_path,
 };

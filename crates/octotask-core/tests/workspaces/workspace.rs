@@ -2,9 +2,9 @@ use std::collections::HashMap;
 use std::fs;
 
 use octotask_core::{
-    Error, Location, NewRepo, NewWorkspace, PullOutcome, Result, checkout_workspace,
-    create_workspace, locate_workspace, pull_workspace, register_repo, remove_workspace,
-    review_workspace, status, workspace_path,
+    CheckoutOutcome, Error, Location, NewRepo, NewWorkspace, PullOutcome, Result,
+    checkout_workspace, create_workspace, locate_workspace, pull_workspace, register_repo,
+    remove_workspace, review_workspace, status, workspace_path,
 };
 
 use super::{
@@ -120,8 +120,14 @@ fn create_workspace_restores_a_branch_left_in_the_cache_with_its_commits() {
 
     let workspace = create_workspace(&fx.registry(), PROJECT, "feat/login", None, false).unwrap();
 
-    assert_eq!(workspace.restored, ["frontend"]);
-    assert!(workspace.created.is_empty() && workspace.kept.is_empty());
+    assert_eq!(
+        workspace.repos_with(CheckoutOutcome::Restored),
+        ["frontend"]
+    );
+    assert!(
+        workspace.repos_with(CheckoutOutcome::Created).is_empty()
+            && workspace.repos_with(CheckoutOutcome::Kept).is_empty()
+    );
     assert_eq!(head(&path.join("frontend"), "HEAD"), local_head);
     assert_eq!(
         git(&path.join("frontend"), &["branch", "--show-current"]),
@@ -141,9 +147,9 @@ fn create_workspace_adds_the_worktrees_missing_from_an_existing_workspace() {
 
     let workspace = create_workspace(&fx.registry(), PROJECT, "feat/login", None, false).unwrap();
 
-    assert_eq!(workspace.created, ["backend"]);
-    assert_eq!(workspace.kept, ["frontend"]);
-    assert!(workspace.restored.is_empty());
+    assert_eq!(workspace.repos_with(CheckoutOutcome::Created), ["backend"]);
+    assert_eq!(workspace.repos_with(CheckoutOutcome::Kept), ["frontend"]);
+    assert!(workspace.repos_with(CheckoutOutcome::Restored).is_empty());
     assert_eq!(head(&path.join("frontend"), "HEAD"), local_head);
     assert_eq!(
         git(&path.join("backend"), &["branch", "--show-current"]),
@@ -249,9 +255,12 @@ fn checkout_workspace_takes_the_remote_branch_where_it_exists_and_the_base_elsew
     let workspace = checkout_workspace(&fx.registry(), PROJECT, "feat/login", None, false).unwrap();
 
     assert_eq!(workspace.path, fx.workspace_dir("feat-login"));
-    assert_eq!(workspace.tracked, ["backend"]);
-    assert_eq!(workspace.created, ["frontend"]);
-    assert!(workspace.kept.is_empty() && workspace.restored.is_empty());
+    assert_eq!(workspace.repos_with(CheckoutOutcome::Tracked), ["backend"]);
+    assert_eq!(workspace.repos_with(CheckoutOutcome::Created), ["frontend"]);
+    assert!(
+        workspace.repos_with(CheckoutOutcome::Kept).is_empty()
+            && workspace.repos_with(CheckoutOutcome::Restored).is_empty()
+    );
     let backend = workspace.path.join("backend");
     assert_eq!(git(&backend, &["branch", "--show-current"]), "feat/login");
     assert_eq!(
@@ -300,8 +309,14 @@ fn checkout_workspace_returns_a_complete_workspace_without_the_network() {
     let workspace = checkout_workspace(&fx.registry(), PROJECT, "feat/login", None, false).unwrap();
 
     assert_eq!(workspace.path, path);
-    assert_eq!(workspace.kept, ["frontend", "backend"]);
-    assert!(workspace.tracked.is_empty() && workspace.created.is_empty());
+    assert_eq!(
+        workspace.repos_with(CheckoutOutcome::Kept),
+        ["frontend", "backend"]
+    );
+    assert!(
+        workspace.repos_with(CheckoutOutcome::Tracked).is_empty()
+            && workspace.repos_with(CheckoutOutcome::Created).is_empty()
+    );
 }
 
 #[test]
@@ -317,9 +332,9 @@ fn checkout_workspace_adds_the_worktrees_missing_from_an_existing_workspace() {
 
     let workspace = checkout_workspace(&fx.registry(), PROJECT, "feat/login", None, false).unwrap();
 
-    assert_eq!(workspace.kept, ["frontend"]);
-    assert_eq!(workspace.tracked, ["backend"]);
-    assert_eq!(workspace.created, ["agent"]);
+    assert_eq!(workspace.repos_with(CheckoutOutcome::Kept), ["frontend"]);
+    assert_eq!(workspace.repos_with(CheckoutOutcome::Tracked), ["backend"]);
+    assert_eq!(workspace.repos_with(CheckoutOutcome::Created), ["agent"]);
     assert_eq!(
         head(&path.join("backend"), "HEAD"),
         head(&fx.remote_dir("backend"), "feat/login")
@@ -362,7 +377,7 @@ fn a_checked_out_branch_is_pulled_and_a_branch_published_later_is_followed() {
 
     let outcomes: Vec<_> = report
         .iter()
-        .map(|(_, result)| *result.as_ref().unwrap())
+        .map(|repo| *repo.result.as_ref().unwrap())
         .collect();
     assert_eq!(outcomes, [PullOutcome::Updated, PullOutcome::Updated]);
     for repo in ["frontend", "backend"] {
@@ -441,8 +456,11 @@ fn review_workspace_gives_each_repo_its_branch_and_the_others_one_from_the_base(
     let workspace = review(&fx, &[("backend", "feat/login"), ("agent", "fix/prompt")]).unwrap();
 
     assert_eq!(workspace.path, fx.workspace_dir("pr-backend-12"));
-    assert_eq!(workspace.tracked, ["backend", "agent"]);
-    assert_eq!(workspace.created, ["frontend"]);
+    assert_eq!(
+        workspace.repos_with(CheckoutOutcome::Tracked),
+        ["backend", "agent"]
+    );
+    assert_eq!(workspace.repos_with(CheckoutOutcome::Created), ["frontend"]);
     for (repo, branch) in [("backend", "feat/login"), ("agent", "fix/prompt")] {
         let worktree = workspace.path.join(repo);
         assert_eq!(git(&worktree, &["branch", "--show-current"]), branch);
@@ -528,9 +546,12 @@ fn review_workspace_adds_the_worktrees_missing_from_an_existing_one() {
 
     let workspace = review(&fx, &[("backend", "feat/login")]).unwrap();
 
-    assert_eq!(workspace.kept, ["frontend", "agent"]);
-    assert_eq!(workspace.restored, ["backend"]);
-    assert_eq!(workspace.created, ["billing"]);
+    assert_eq!(
+        workspace.repos_with(CheckoutOutcome::Kept),
+        ["frontend", "agent"]
+    );
+    assert_eq!(workspace.repos_with(CheckoutOutcome::Restored), ["backend"]);
+    assert_eq!(workspace.repos_with(CheckoutOutcome::Created), ["billing"]);
     assert_eq!(
         git(&path.join("backend"), &["branch", "--show-current"]),
         "feat/login"
@@ -550,7 +571,7 @@ fn a_reviewed_workspace_is_pulled_and_removed_like_any_other() {
     let report = pull_workspace(&fx.home(), &fx.project(), "pr-backend-12").unwrap();
     let outcomes: Vec<_> = report
         .iter()
-        .map(|(_, result)| *result.as_ref().unwrap())
+        .map(|repo| *repo.result.as_ref().unwrap())
         .collect();
     assert_eq!(
         outcomes,
@@ -594,8 +615,11 @@ fn a_review_is_remembered_so_any_command_completes_it_with_the_same_branches() {
         listed.workspaces[0].branch.as_deref(),
         Some("pr-backend-12")
     );
-    assert_eq!(workspace.restored, ["frontend", "backend"]);
-    assert_eq!(workspace.kept, ["agent"]);
+    assert_eq!(
+        workspace.repos_with(CheckoutOutcome::Restored),
+        ["frontend", "backend"]
+    );
+    assert_eq!(workspace.repos_with(CheckoutOutcome::Kept), ["agent"]);
     assert_eq!(
         git(&path.join("backend"), &["branch", "--show-current"]),
         "feat/login"
@@ -729,7 +753,7 @@ fn pull_workspace_fast_forwards_each_worktree_to_its_remote_branch() {
 
     let outcomes: Vec<_> = report
         .iter()
-        .map(|(key, result)| (key.as_str(), *result.as_ref().unwrap()))
+        .map(|repo| (repo.key.as_str(), *repo.result.as_ref().unwrap()))
         .collect();
     assert_eq!(
         outcomes,
@@ -762,7 +786,7 @@ fn pull_workspace_leaves_up_to_date_and_diverged_worktrees_alone() {
 
     let outcomes: Vec<_> = report
         .iter()
-        .map(|(_, result)| *result.as_ref().unwrap())
+        .map(|repo| *repo.result.as_ref().unwrap())
         .collect();
     assert_eq!(outcomes, [PullOutcome::UpToDate, PullOutcome::Diverged]);
     assert_eq!(head(&path.join("backend"), "HEAD"), local_head);
@@ -791,7 +815,7 @@ fn pull_workspace_skips_repos_without_a_worktree_or_a_branch() {
 
     let outcomes: Vec<_> = report
         .iter()
-        .map(|(_, result)| *result.as_ref().unwrap())
+        .map(|repo| *repo.result.as_ref().unwrap())
         .collect();
     assert_eq!(outcomes, [PullOutcome::Detached, PullOutcome::NoWorktree]);
 }
@@ -836,7 +860,7 @@ fn status_reports_repos_and_the_checkouts_of_every_workspace() {
     let commit = checkout.commit.as_ref().unwrap();
     assert_eq!(commit.subject, "add login endpoint");
     assert!(!commit.date.is_empty() && !commit.age.is_empty());
-    assert_eq!(checkout.error, None);
+    assert!(checkout.error.is_none());
 }
 
 #[test]

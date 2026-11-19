@@ -1,8 +1,8 @@
 use std::fs;
 
 use octotask_core::{
-    Error, NewRepo, RepoChanges, create_workspace, fetch_repos, register_repo, set_workspace_run,
-    unregister_repo, update_repo,
+    Error, FetchOutcome, NewRepo, RepoChanges, create_workspace, fetch_repos, register_repo,
+    set_workspace_run, unregister_repo, update_repo,
 };
 
 use super::{Fixture, PROJECT, commit_on, git, head, keep_project_base, refuse_missing_base};
@@ -88,13 +88,13 @@ fn fetch_repos_brings_new_commits_into_every_cache() {
 
     let report = fetch_repos(&fx.home(), &fx.project());
 
-    let keys: Vec<_> = report.iter().map(|(key, _)| key.as_str()).collect();
+    let keys: Vec<_> = report.iter().map(|repo| repo.key.as_str()).collect();
     assert_eq!(keys, ["frontend", "backend"]);
-    for (key, result) in &report {
-        result.as_ref().unwrap();
+    for repo in &report {
+        assert_eq!(*repo.result.as_ref().unwrap(), FetchOutcome::Fetched);
         assert_eq!(
-            head(&fx.cache_dir(key), "refs/remotes/origin/main"),
-            head(&fx.remote_dir(key), "main")
+            head(&fx.cache_dir(&repo.key), "refs/remotes/origin/main"),
+            head(&fx.remote_dir(&repo.key), "main")
         );
     }
 }
@@ -117,7 +117,7 @@ fn fetch_repos_clones_a_missing_cache() {
 
     let report = fetch_repos(&fx.home(), &fx.project());
 
-    report[0].1.as_ref().unwrap();
+    assert_eq!(*report[0].result.as_ref().unwrap(), FetchOutcome::Cloned);
     assert!(fx.cache_dir("frontend").is_dir());
 }
 
@@ -132,8 +132,8 @@ fn fetch_repos_continues_after_a_failing_repo() {
 
     let report = fetch_repos(&fx.home(), &fx.project());
 
-    assert!(report[0].1.is_err());
-    report[1].1.as_ref().unwrap();
+    assert!(report[0].result.is_err());
+    report[1].result.as_ref().unwrap();
     assert_eq!(
         head(&fx.cache_dir("backend"), "refs/remotes/origin/main"),
         head(&fx.remote_dir("backend"), "main")
@@ -167,7 +167,7 @@ fn fetch_repos_follows_a_url_changed_in_the_project_file() {
 
     let report = fetch_repos(&fx.home(), &fx.project());
 
-    report[0].1.as_ref().unwrap();
+    report[0].result.as_ref().unwrap();
     assert_eq!(
         head(&fx.cache_dir("app"), "refs/remotes/origin/main"),
         head(&fx.remote_dir("new"), "main")
