@@ -1,7 +1,8 @@
-# JSON output of `octok`
+# JSON output
+
+What each command of `octok` prints with `--json`, how a failure looks, and what the exit codes mean.
 
 Every command of `octok` accepts `--json`, before or after the command.
-This page lists what each command then prints, how a failure looks, and what the exit codes mean.
 
 ## Rules
 
@@ -47,7 +48,7 @@ They are the same with and without `--json`.
 | 0 | The command did what it was asked. | |
 | 1 | Another error: git or `gh` failed, a file cannot be read. | Read `error.message`. |
 | 2 | The command is not written the way `octok` takes it: an unknown option, a name that is not valid, no project given. | Fix the command. |
-| 3 | Something the command names is not there: a project, a repository, a branch, a workspace, a run command. | Check the name with `octok status --json`. |
+| 3 | Something the command names is not there: a project, a repository, a branch, a workspace, a run command, a page of the documentation. | Check the name with `octok status --json`, or the page with `octok docs --json`. |
 | 4 | Refused, because it would lose work that exists nowhere else. | Commit and push, or ask the user. Never add `--force` on your own. |
 | 5 | Refused, because it conflicts with what exists: already there, in use, or no longer applies. | Read `error.code`. |
 | 6 | The command went through the repositories one by one, and at least one failed. The document is the normal one, with an `error` in the entry of each failed repository. | Read `repos`. |
@@ -97,6 +98,7 @@ They are the same with and without `--json`.
 | `no_run_command` | 3 | `repo` |
 | `no_worktree` | 3 | `repo`, `workspace` |
 | `dev_file_not_found` | 3 | `file` |
+| `topic_not_found` | 3 | `topic` |
 | `workspace_has_work` | 4 | `workspace`, `reasons` |
 | `duplicate_repo` | 5 | `repo`, `url` |
 | `duplicate_alias` | 5 | `alias`, `repo` |
@@ -272,3 +274,22 @@ That happens to commands that are still running 10 seconds after a stop, with `s
 
 A command that fails before anything starts prints one failure document instead.
 A setup command that fails ends its repository: the `exited` event has its code, and the run command does not start.
+
+### `octok docs`
+
+```json
+{"schema":1,"topics":[{"topic":"agents/json-output","title":"JSON output","summary":"What each command of `octok` prints with `--json`, how a failure looks, and what the exit codes mean."},{"topic":"reference/commands","title":"Command reference","summary":"Every command of `octok` with its arguments and options, as its `--help` describes them."}]}
+```
+
+`topics` lists every page of the documentation of this version of `octok`, in reading order.
+`topic` is what `octok docs <topic>` takes, `title` is the title of the page and `summary` is the sentence under its title.
+The example above shows two pages of the list.
+
+`octok docs <topic>` prints one page, with its text as Markdown in `markdown`:
+
+```json
+{"schema":1,"topic":"agents/json-output","title":"JSON output","summary":"What each command of `octok` prints with `--json`, how a failure looks, and what the exit codes mean.","markdown":"# JSON output\n\nWhat each command of `octok` prints with `--json`, how a failure looks, and what the exit codes mean.\n..."}
+```
+
+`octok docs` needs no project.
+A topic that is not a page fails with `topic_not_found`.

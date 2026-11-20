@@ -165,6 +165,8 @@ pub enum Error {
     },
     #[error("`{0}` asks at the terminal, which `--json` never does: run it without `--json`")]
     NeedsTerminal(&'static str),
+    #[error("topic `{0}` not found: list the topics with `octok docs`")]
+    TopicNotFound(String),
 }
 
 /// What went wrong, in the few classes a caller may act on without reading the message.
@@ -209,7 +211,8 @@ impl Error {
             | Self::NothingToRun(_)
             | Self::NoRunCommand(_)
             | Self::NoWorktree { .. }
-            | Self::DevFileNotFound(_) => ErrorKind::NotFound,
+            | Self::DevFileNotFound(_)
+            | Self::TopicNotFound(_) => ErrorKind::NotFound,
             Self::WorkspaceHasWork { .. } => ErrorKind::WorkAtRisk,
             Self::DuplicateRepo { .. }
             | Self::DuplicateAlias { .. }
@@ -363,6 +366,7 @@ impl Error {
                 }),
             ),
             Self::NeedsTerminal(command) => ("needs_terminal", json!({"command": command})),
+            Self::TopicNotFound(topic) => ("topic_not_found", json!({"topic": topic})),
         }
     }
 }

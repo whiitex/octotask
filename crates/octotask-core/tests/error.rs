@@ -67,6 +67,7 @@ fn every_class_of_failure_has_its_errors() {
         (Error::NoDefaultProject, ErrorKind::Usage),
         (Error::RepoNotFound(text("x")), ErrorKind::NotFound),
         (Error::WorkspaceNotFound(text("x")), ErrorKind::NotFound),
+        (Error::TopicNotFound(text("x")), ErrorKind::NotFound),
         (
             Error::WorkspaceHasWork {
                 name: text("x"),

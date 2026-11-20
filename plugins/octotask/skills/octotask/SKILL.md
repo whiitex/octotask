@@ -43,13 +43,17 @@ For a single repository that is not in a project, use `git` alone.
 | 0 | Done. | |
 | 1 | Another error, such as a git command that failed. | Read `error.message`. |
 | 2 | The command is not written the way `octok` takes it. | Fix the command. |
-| 3 | A project, repository, branch, workspace or run command it needs is not there. | Check the name with `octok status --json`. |
+| 3 | A project, repository, branch, workspace, run command or documentation page it needs is not there. | Check the name with `octok status --json`. |
 | 4 | Refused: it would lose work that exists nowhere else. | Commit and push, or ask the user. |
 | 5 | Refused: it conflicts with what exists. | Read `error.code`. |
 | 6 | At least one repository failed. The document is the normal one. | Read `error` in each entry of `repos`. |
 | 7 | Another machine or a program cannot be reached. | Ask the user. |
 
-The document of every command and every `error.code` are in [references/json-output.md](references/json-output.md).
+The document of every command and every `error.code` are in the page `agents/json-output`: read it with `octok docs agents/json-output`.
+
+`octok docs` lists the pages of the documentation of the installed `octok`, and `octok docs <topic>` prints one as Markdown.
+The pages describe the version that prints them, so prefer them to what you remember of `octok`.
+Reading a page is the one exception to `--json`: the page is the same Markdown either way, and easier to read without it.
 
 ## The usual flow
 
@@ -114,7 +118,7 @@ The document of every command and every `error.code` are in [references/json-out
 
    It fetches and fast-forwards each checkout, and never merges, rebases or resets.
    Inside a checkout, `octok pull --json` alone updates the workspace of that folder.
-   Read `repos[].outcome`: `updated` and `up_to_date` are fine, `no_remote_branch` means the branch was never pushed for that repository, and `diverged` means that checkout needs a merge or a rebase, which is yours to do with `git`.
+   Read `repos[].outcome`: `updated` and `up_to_date` are fine, `no_remote_branch` means the branch was never pushed for that repository, or was deleted on the remote, and `diverged` means that checkout needs a merge or a rebase, which is yours to do with `git`.
 
 6. **Remove** the workspace when the work is merged or pushed:
 
@@ -122,8 +126,9 @@ The document of every command and every `error.code` are in [references/json-out
    octok rm feat/login --json
    ```
 
-   Exit 4 with `workspace_has_work` means it holds uncommitted changes or unpushed commits.
-   `error.reasons` names the repositories, not the files: run `git status` in those checkouts to see them.
+   Exit 4 with `workspace_has_work` means it holds uncommitted changes, unpushed commits, or other files next to the checkouts.
+   Each line of `error.reasons` names a repository and what it holds, not the files: run `git status` in that checkout to see them.
+   The line `other files in the workspace: ...` names the files that sit in the workspace folder and belong to no checkout.
    Commit and push what belongs to the task, and ask the user about anything else.
    Leave a workspace you did not create alone unless the user asks.
 
@@ -161,6 +166,7 @@ These lose work or change what the user set up, so ask first and run them only o
 | `octok project ls --json` | Lists the projects and the default one. |
 | `octok dev show --json` | Shows the dev changes saved for each repository: the local-only edits that every new workspace gets and no commit contains. |
 | `octok up --branch <branch> --json` | Starts every repository of the workspace that has a run command, and stays attached until they end. |
+| `octok docs <topic>` | Prints a page of the documentation of the installed `octok`. `octok docs` lists the pages. Needs no project. |
 
 A repository is named by its `key` or its `alias` wherever a command takes one.
 
