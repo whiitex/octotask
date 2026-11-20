@@ -452,8 +452,9 @@ It does not contact the git remotes, and it connects over `ssh` only to the othe
 ## Use with AI agents
 
 A coding agent with a shell can drive `octok` for a task that touches several repositories.
-The skill in [skills/octotask](skills/octotask/SKILL.md) tells it when to use `octok`, the usual sequence of commands, how to read their JSON output, and what it must never do without asking you, such as `--force`.
+The skill in [plugins/octotask/skills/octotask](plugins/octotask/skills/octotask/SKILL.md) tells it when to use `octok`, the usual sequence of commands, how to read their JSON output, and what it must never do without asking you, such as `--force`.
 It is in the [Agent Skills](https://agentskills.io) format, which Claude Code, Codex, Cursor and other agents load.
+The folder [plugins/octotask](plugins/octotask) is the plugin that carries it, with the version of `octok` it describes.
 
 Install it in Claude Code, version 2.1.275 or newer:
 
@@ -461,7 +462,14 @@ Install it in Claude Code, version 2.1.275 or newer:
 claude plugin install octotask --marketplace whiitex/octotask
 ```
 
-Install it for another agent with the [`skills`](https://github.com/vercel-labs/skills) installer, or copy the folder `skills/octotask` into the skills folder of the agent:
+Install it in Codex, version 0.146.0 or newer:
+
+```sh
+codex plugin marketplace add whiitex/octotask
+codex plugin add octotask@octotask
+```
+
+Install it for another agent with the [`skills`](https://github.com/vercel-labs/skills) installer, or copy the folder `plugins/octotask/skills/octotask` into the skills folder of the agent:
 
 ```sh
 npx skills add whiitex/octotask
@@ -505,7 +513,7 @@ The exit code says which kind of failure happened, with and without `--json`:
 | 7 | Another machine or a program cannot be reached. |
 | 130 | `octok up` was stopped. |
 
-The document of every command and the list of the error codes are in [skills/octotask/references/json-output.md](skills/octotask/references/json-output.md).
+The document of every command and the list of the error codes are in [plugins/octotask/skills/octotask/references/json-output.md](plugins/octotask/skills/octotask/references/json-output.md).
 
 ## Development
 

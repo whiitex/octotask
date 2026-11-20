@@ -1,0 +1,20 @@
+{
+  "name": "octotask",
+  "interface": {
+    "displayName": "octotask"
+  },
+  "plugins": [
+    {
+      "name": "octotask",
+      "source": {
+        "source": "local",
+        "path": "./plugins/octotask"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}
