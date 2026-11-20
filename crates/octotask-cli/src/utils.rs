@@ -628,6 +628,6 @@ fn sha_width<'a>(commits: impl Iterator<Item = &'a Commit>) -> usize {
     max_width(commits.map(|commit| commit.sha.as_str()))
 }
 
-fn max_width<'a>(values: impl Iterator<Item = &'a str>) -> usize {
+pub(crate) fn max_width<'a>(values: impl Iterator<Item = &'a str>) -> usize {
     values.map(str::len).max().unwrap_or(0)
 }

@@ -1,3 +1,4 @@
+mod docs;
 mod prompts;
 mod utils;
 
@@ -8,7 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, Parser, Subcommand};
 use octotask_core::{
     Error, Gh, Home, Location, NewRepo, NewWorkspace, OriginBranches, Project, Registry,
     RepoChanges, Result, Ssh, Stopper, check_remote_branch, checkout_workspace, create_workspace,
@@ -133,12 +134,21 @@ enum Command {
         /// Machine whose key to unlock (defaults to every other machine of the project)
         host: Option<String>,
     },
+    /// Print the documentation of this version of octok: the list of its pages, or one page
+    ///
+    /// Without a topic, lists every page with its topic, title and summary. With a topic,
+    /// prints that page as Markdown. Needs no project.
+    Docs {
+        /// Page to print, as `octok docs` lists it, e.g. `commands/project`
+        topic: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
 enum ProjectCommand {
     /// Create a new project and make it the default
     Init {
+        /// Name of the new project
         name: String,
         /// Default base branch for the project's repos [default: staging]
         #[arg(long)]
@@ -150,7 +160,10 @@ enum ProjectCommand {
     /// List projects
     Ls,
     /// Set the default project
-    Use { name: String },
+    Use {
+        /// Project to make the default
+        name: String,
+    },
     /// Change the settings of the project
     Set {
         #[command(flatten)]
@@ -161,6 +174,7 @@ enum ProjectCommand {
         /// Also delete its workspaces, with their uncommitted changes and unpushed commits
         #[arg(long)]
         force: bool,
+        /// Project to delete
         name: String,
     },
 }
@@ -257,6 +271,7 @@ fn pull_request_number(text: &str) -> Option<u64> {
 enum RepoCommand {
     /// Register a git repo in the project and clone it
     Add {
+        /// Git url of the repo, as `git clone` takes it
         url: String,
         /// Key for the repo, also its folder name (defaults to the url's last path segment)
         #[arg(long)]
@@ -281,7 +296,10 @@ enum RepoCommand {
         changes: RepoSetArgs,
     },
     /// Unregister a repo, given by key or alias, and delete its clone
-    Rm { key: String },
+    Rm {
+        /// Key or alias of the repo
+        key: String,
+    },
 }
 
 #[derive(Args)]
@@ -407,6 +425,11 @@ fn refuse_command_line(refusal: &clap::Error) -> ExitCode {
 }
 
 fn run(cli: Cli, out: Output) -> Result<ExitCode> {
+    if let Command::Docs { topic } = &cli.command {
+        // Everything it prints is built in: it reads no home and no project.
+        docs::show(topic.as_deref(), &Cli::command(), out)?;
+        return Ok(ExitCode::SUCCESS);
+    }
     let registry = Registry::new(Home::from_env()?);
     let explicit_project = cli.project.as_deref();
     let resolve_project = || registry.resolve_project(explicit_project);
@@ -489,6 +512,7 @@ fn run(cli: Cli, out: Output) -> Result<ExitCode> {
             let project = registry.load_project(&resolve_project()?)?;
             out.result(&status(registry.home(), &project)?, print_status);
         }
+        Command::Docs { .. } => unreachable!("handled before the home is read"),
     }
     Ok(ExitCode::SUCCESS)
 }

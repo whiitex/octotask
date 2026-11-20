@@ -7,6 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use assert_cmd::prelude::*;
 use tempfile::TempDir;
 
 /// The name of the plugin, of its one skill and of the catalogs that list it.
@@ -60,13 +61,21 @@ fn read_json(path: &Path) -> serde_json::Value {
     serde_json::from_str(&read(path)).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
 }
 
-/// The pages an agent reads: the skill and its references.
+/// The pages an agent reads: the skill, and the page of the book it reads with `octok docs`.
 fn skill_pages() -> Vec<PathBuf> {
-    let mut pages = vec![skill_dir().join("SKILL.md")];
-    let references = fs::read_dir(skill_dir().join("references")).unwrap();
-    pages.extend(references.map(|entry| entry.unwrap().path()));
-    pages.sort();
-    pages
+    vec![
+        skill_dir().join("SKILL.md"),
+        repo_root().join("docs/src/agents/json-output.md"),
+    ]
+}
+
+/// Every topic of `octok docs <topic>` written in `text`, placeholders aside.
+fn docs_topics(text: &str) -> BTreeSet<&str> {
+    text.split("octok docs ")
+        .skip(1)
+        .filter_map(|rest| rest.split(COMMAND_END).next()?.split_whitespace().next())
+        .filter(|topic| !topic.starts_with(['<', '[', '-']))
+        .collect()
 }
 
 /// Every `octok ...` written in `text`, as the arguments a shell would pass. A
@@ -220,12 +229,28 @@ fn the_skill_links_only_to_pages_it_ships() {
         .map(|link| link.split('#').next().unwrap_or(link))
         .collect();
 
-    assert!(!links.is_empty(), "the skill links to its reference");
     for link in links {
         assert!(
             skill_dir().join(link).is_file(),
             "`{link}` is not in the skill"
         );
+    }
+}
+
+#[test]
+fn every_page_the_skill_sends_to_is_one_octok_docs_prints() {
+    let skill = read(&skill_dir().join("SKILL.md"));
+    let topics = docs_topics(&skill);
+
+    assert!(
+        topics.contains("agents/json-output"),
+        "the skill sends to the JSON reference"
+    );
+    for topic in topics {
+        Command::new(assert_cmd::cargo::cargo_bin!("octok"))
+            .args(["docs", topic])
+            .assert()
+            .success();
     }
 }
 

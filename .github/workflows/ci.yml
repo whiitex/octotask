@@ -43,10 +43,21 @@ jobs:
           version=$(.github/scripts/crate-version.sh)
           .github/scripts/check-version.sh "$version"
 
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install mdBook
+        run: .github/scripts/install-mdbook.sh "$RUNNER_TEMP/mdbook"
+      - name: Test the documentation build
+        run: .github/scripts/build-docs-test.sh
+      - name: Build the documentation
+        run: .github/scripts/build-docs.sh
+
   # The one check the ruleset requires: it passes when each job above passed or was skipped.
   check:
     if: always()
-    needs: [test, version]
+    needs: [test, version, docs]
     runs-on: ubuntu-latest
     steps:
       - name: Fail if a job failed

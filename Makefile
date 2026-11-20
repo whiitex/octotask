@@ -7,7 +7,7 @@ DATA_DIR := $(or $(OCTOTASK_HOME),$(HOME)/.octotask)
 # The octok of this checkout: an installed one may be older than the project files.
 OCTOK := $(CARGO) run --quiet --locked -p octotask --
 
-.PHONY: format test build install clean-data install-clean
+.PHONY: format test build install docs docs-serve docs-reference clean-data install-clean
 
 format:
 	$(CARGO) fmt --all
@@ -20,6 +20,18 @@ build:
 
 install:
 	$(CARGO) install --path crates/octotask-cli --locked
+
+# Needs mdbook on PATH: .github/scripts/install-mdbook.sh installs the version CI uses.
+docs:
+	.github/scripts/build-docs.sh
+
+docs-serve:
+	mdbook serve docs
+
+# The committed docs/src/reference/commands.md is this output; a test fails when it is stale.
+docs-reference:
+	$(OCTOK) docs reference/commands > target/commands.md
+	mv target/commands.md docs/src/reference/commands.md
 
 # The projects go first: only octok knows which folders they have on other machines.
 # If one cannot be deleted, this stops before the data folder goes, so its project file is kept.
