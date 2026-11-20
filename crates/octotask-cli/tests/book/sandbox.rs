@@ -103,10 +103,15 @@ impl Sandbox {
 
     /// Who commits, and the urls of the fixture remotes. `~/.gitconfig` is the only git config
     /// read: `HOME` is the sandbox and the system one is turned off.
+    ///
+    /// No maintenance after a command: a recent git runs it in the background, and its
+    /// `maintenance.lock` shows up in an example only when the example is faster than it.
     fn write_git_config(&self) {
         let config = format!(
             "[user]\n\tname = You\n\temail = you@example.com\n\
              [init]\n\tdefaultBranch = main\n\
+             [maintenance]\n\tauto = false\n\
+             [gc]\n\tauto = 0\n\
              [url \"{}/\"]\n\tinsteadOf = {GITHUB}\n",
             self.remotes_dir().display()
         );
