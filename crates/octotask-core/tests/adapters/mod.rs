@@ -9,7 +9,7 @@ mod utils;
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -101,8 +101,8 @@ impl FakeRemote {
         fs::create_dir_all(&bin).unwrap();
         fs::create_dir_all(remote.home()).unwrap();
         fs::create_dir_all(remote.local_home()).unwrap();
-        install(&bin.join("ssh"), include_str!("../fixtures/ssh"));
-        install(&bin.join("ssh-add"), include_str!("../fixtures/ssh-add"));
+        install(&bin, "ssh");
+        install(&bin, "ssh-add");
         remote
     }
 
@@ -162,7 +162,7 @@ impl FakeGh {
             tmp: TempDir::new().unwrap(),
         };
         fs::create_dir_all(gh.bin_dir()).unwrap();
-        install(&gh.bin_dir().join("gh"), include_str!("../fixtures/gh"));
+        install(&gh.bin_dir(), "gh");
         gh
     }
 
@@ -196,7 +196,12 @@ fn fake_remote_path(var: &str) -> PathBuf {
     PathBuf::from(env::var_os(var).unwrap())
 }
 
-fn install(path: &Path, script: &str) {
-    fs::write(path, script).unwrap();
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+/// Links a fake program of `tests/fixtures` into `bin`.
+/// A link and not a copy: Linux refuses to run a file that a process has open for writing
+/// ("Text file busy"), and a test that forks in parallel holds a copy open for a moment.
+fn install(bin: &Path, program: &str) {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(program);
+    symlink(fixture, bin.join(program)).unwrap();
 }

@@ -2,7 +2,7 @@
 
 use std::env;
 use std::fs;
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -121,24 +121,12 @@ impl Sandbox {
     /// `octok`, and fakes of `ssh`, `ssh-add` and `gh` that never reach the network.
     fn install_programs(&self) {
         symlink(env!("CARGO_BIN_EXE_octok"), self.bin_dir().join("octok")).unwrap();
-        let fakes = [
-            (
-                "ssh",
-                include_str!("../../../octotask-core/tests/fixtures/ssh"),
-            ),
-            (
-                "ssh-add",
-                include_str!("../../../octotask-core/tests/fixtures/ssh-add"),
-            ),
-            (
-                "gh",
-                include_str!("../../../octotask-core/tests/fixtures/gh"),
-            ),
-        ];
-        for (name, script) in fakes {
-            let path = self.bin_dir().join(name);
-            fs::write(&path, script).unwrap();
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        // Links and not copies: Linux refuses to run a file that a process has open for
+        // writing ("Text file busy"), and a page that forks in parallel holds a copy open.
+        let fixtures =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../octotask-core/tests/fixtures");
+        for fake in ["ssh", "ssh-add", "gh"] {
+            symlink(fixtures.join(fake), self.bin_dir().join(fake)).unwrap();
         }
     }
 

@@ -2,7 +2,7 @@ use std::env;
 use std::ffi::OsString;
 use std::fs;
 use std::io::{BufRead, BufReader};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
 use std::thread;
@@ -32,18 +32,9 @@ impl Env {
         let bin = env.machine_dir().join("bin");
         fs::create_dir_all(&bin).unwrap();
         fs::create_dir_all(env.machine_home()).unwrap();
-        install(
-            &bin.join("ssh"),
-            include_str!("../../octotask-core/tests/fixtures/ssh"),
-        );
-        install(
-            &bin.join("ssh-add"),
-            include_str!("../../octotask-core/tests/fixtures/ssh-add"),
-        );
-        install(
-            &bin.join("gh"),
-            include_str!("../../octotask-core/tests/fixtures/gh"),
-        );
+        install(&bin, "ssh");
+        install(&bin, "ssh-add");
+        install(&bin, "gh");
         env
     }
 
@@ -281,9 +272,14 @@ fn git(dir: &Path, args: &[&str]) -> String {
     String::from_utf8(output.stdout).unwrap().trim().to_string()
 }
 
-fn install(path: &Path, script: &str) {
-    fs::write(path, script).unwrap();
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+/// Links a fake program of the core fixtures into `bin`.
+/// A link and not a copy: Linux refuses to run a file that a process has open for writing
+/// ("Text file busy"), and a test that forks in parallel holds a copy open for a moment.
+fn install(bin: &Path, program: &str) {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../octotask-core/tests/fixtures")
+        .join(program);
+    symlink(fixture, bin.join(program)).unwrap();
 }
 
 /// An empty commit on a new `branch`, made at `date`.
