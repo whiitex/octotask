@@ -1,0 +1,31 @@
+[package]
+name = "octotask"
+description = "Run the same git operation on every repository of a project"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[dependencies]
+clap = { version = "4.6.7", features = ["derive"] }
+libc = "0.2.191"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
+octotask-core = { path = "../octotask-core" }
+signal-hook = "0.4.6"
+
+[dev-dependencies]
+assert_cmd = "2.2.2"
+predicates = "3.1.4"
+rexpect = "0.7.1"
+tempfile = "3.27.0"
+
+[[bin]]
+name = "octok"
+path = "src/main.rs"
+
+[[test]]
+name = "book"
+path = "tests/book/mod.rs"

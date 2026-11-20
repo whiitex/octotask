@@ -1,0 +1,94 @@
+use std::path::PathBuf;
+
+use crate::{Error, Location, Result};
+
+/// Root of all `octok` state on disk (`~/.octotask` by default, overridable with `OCTOTASK_HOME`).
+#[derive(Debug, Clone)]
+pub struct Home {
+    root: PathBuf,
+}
+
+impl Home {
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+
+    pub fn from_env() -> Result<Self> {
+        match std::env::var_os("OCTOTASK_HOME") {
+            Some(root) if !root.is_empty() => Ok(Self::new(root)),
+            _ => std::env::home_dir()
+                .map(|home| Self::new(home.join(".octotask")))
+                .ok_or(Error::NoHome),
+        }
+    }
+
+    /// The octok home on the machine of `location`.
+    pub fn at(&self, location: &Location) -> Self {
+        match location {
+            Location::Local => self.clone(),
+            Location::Remote { root, .. } => Self::new(root),
+        }
+    }
+
+    pub fn root(&self) -> PathBuf {
+        self.root.clone()
+    }
+
+    pub fn projects_dir(&self) -> PathBuf {
+        self.root.join("projects")
+    }
+
+    pub fn project_file(&self, name: &str) -> PathBuf {
+        self.projects_dir().join(format!("{name}.yaml"))
+    }
+
+    pub fn global_config_file(&self) -> PathBuf {
+        self.root.join("config.yaml")
+    }
+
+    pub fn registry_lock_file(&self) -> PathBuf {
+        self.root.join("registry.lock")
+    }
+
+    pub fn caches_root(&self) -> PathBuf {
+        self.root.join("cache")
+    }
+
+    pub fn caches_dir(&self, project: &str) -> PathBuf {
+        self.caches_root().join(project)
+    }
+
+    /// Bare clone shared by every workspace of the project.
+    pub fn cache_dir(&self, project: &str, repo: &str) -> PathBuf {
+        self.caches_dir(project).join(format!("{repo}.git"))
+    }
+
+    pub fn cache_lock_file(&self, project: &str, repo: &str) -> PathBuf {
+        self.caches_dir(project).join(format!("{repo}.lock"))
+    }
+
+    pub fn workspaces_root(&self) -> PathBuf {
+        self.root.join("workspaces")
+    }
+
+    pub fn workspaces_dir(&self, project: &str) -> PathBuf {
+        self.workspaces_root().join(project)
+    }
+
+    pub fn workspace_dir(&self, project: &str, workspace: &str) -> PathBuf {
+        self.workspaces_dir(project).join(workspace)
+    }
+
+    pub fn dev_changes_root(&self) -> PathBuf {
+        self.root.join("dev")
+    }
+
+    pub fn dev_changes_dirs(&self, project: &str) -> PathBuf {
+        self.dev_changes_root().join(project)
+    }
+
+    /// The dev changes saved for a repo: what every new checkout of it gets.
+    pub fn dev_changes_dir(&self, project: &str, repo: &str) -> PathBuf {
+        self.dev_changes_dirs(project).join(repo)
+    }
+}

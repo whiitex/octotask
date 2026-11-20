@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main, staging]
+  push:
+    branches: [main, staging]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal -c rustfmt -c clippy && rustup default stable
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Lint
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Test
+        run: cargo test --workspace --locked
+      - name: Test the release scripts
+        run: .github/scripts/check-version-test.sh
+
+  # Every merge into main is released, so a pull request to main must carry a new version.
+  version:
+    if: github.event_name == 'pull_request' && github.base_ref == 'main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - name: Check that the version can be released
+        run: |
+          version=$(.github/scripts/crate-version.sh)
+          .github/scripts/check-version.sh "$version"
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install mdBook
+        run: .github/scripts/install-mdbook.sh "$RUNNER_TEMP/mdbook"
+      - name: Test the documentation build
+        run: .github/scripts/build-docs-test.sh
+      - name: Build the documentation
+        run: .github/scripts/build-docs.sh
+
+  # The one check the ruleset requires: it passes when each job above passed or was skipped.
+  check:
+    if: always()
+    needs: [test, version, docs]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail if a job failed
+        # Without `always()` the step is skipped exactly when a job failed, and this job passes.
+        if: always() && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled'))
+        run: exit 1

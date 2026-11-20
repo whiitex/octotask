@@ -1,0 +1,19 @@
+[book]
+title = "Octotask"
+description = "octok runs the same git operation on every repository of a project"
+language = "en"
+src = "src"
+
+[build]
+build-dir = "../target/book"
+# A page missing from SUMMARY.md must fail the build, not be created empty.
+create-missing = false
+
+[output.html]
+git-repository-url = "https://github.com/whiitex/octotask"
+edit-url-template = "https://github.com/whiitex/octotask/edit/staging/docs/{path}"
+# The site is served under https://whiitex.github.io/octotask/.
+site-url = "/octotask/"
+
+[output.html.search]
+enable = true

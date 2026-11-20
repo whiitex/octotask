@@ -1,0 +1,30 @@
+#!/bin/sh
+# Stands in for `ssh` in the tests, with no network.
+# It logs its arguments, then runs the command on this machine the way sshd does:
+# as one string handed to a shell, starting in the home of the remote user.
+printf '%s\n' "$*" >> "$FAKE_SSH_LOG"
+
+if [ "$1" = "-G" ]; then
+    cat "$FAKE_SSH_CONFIG"
+    exit 0
+fi
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -o) shift 2 ;;
+        --) shift; break ;;
+        *) break ;;
+    esac
+done
+host=$1
+shift
+
+if [ "$host" = "unreachable" ]; then
+    echo "ssh: connect to host unreachable port 22: Connection refused" >&2
+    exit 255
+fi
+
+# The shell stays the parent of the command unless the command is an `exec`, as the
+# `dash` of Ubuntu does: the `exit` keeps any `sh` from replacing itself on its own.
+cd "$FAKE_SSH_HOME" && exec sh -c "$*
+exit \$?"

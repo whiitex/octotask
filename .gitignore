@@ -1,1 +1,6 @@
+logs/
+docs/*
+!docs/src/
+!docs/book.toml
 target/
+CLAUDE.md
