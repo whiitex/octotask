@@ -578,13 +578,22 @@ fn concurrent_repo_adds_are_all_saved() {
     let children: Vec<_> = (0..REPOS)
         .map(|i| {
             env.octok(&["repo", "add", &env.remote(&format!("repo{i}"))])
+                // `spawn` passes on the terminal of whoever runs the tests, and at a
+                // terminal `octok` asks questions.
+                .stdin(Stdio::null())
                 .stdout(Stdio::null())
+                .stderr(Stdio::piped())
                 .spawn()
                 .unwrap()
         })
         .collect();
-    for mut child in children {
-        assert!(child.wait().unwrap().success());
+    for child in children {
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     let ls = env.json(&["repo", "ls", "--json"]);
@@ -2073,6 +2082,8 @@ impl Up {
     fn start_with(env: &Env, args: &[&str]) -> Self {
         let mut octok = env
             .octok(args)
+            // Not the terminal of whoever runs the tests.
+            .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
