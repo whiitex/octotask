@@ -8,7 +8,7 @@
   "plugins": [
     {
       "name": "octotask",
-      "source": "./skills/octotask",
+      "source": "./plugins/octotask",
       "description": "Drive octok: one workspace per feature, with a checkout of every repository of a project on the same branch",
       "homepage": "https://github.com/whiitex/octotask",
       "repository": "https://github.com/whiitex/octotask",

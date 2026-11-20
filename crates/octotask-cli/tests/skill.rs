@@ -1,5 +1,6 @@
-//! Checks `skills/octotask/` against the real `octok`, so a renamed command or option
-//! fails the build instead of leaving a stale instruction for the agents that read it.
+//! Checks the plugin in `plugins/octotask/` against the real `octok` and against what each
+//! agent asks of a plugin, so a renamed command or a moved file fails the build instead of
+//! leaving a stale instruction for the agents that read it.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -8,7 +9,32 @@ use std::process::Command;
 
 use tempfile::TempDir;
 
+/// The name of the plugin, of its one skill and of the catalogs that list it.
 const SKILL: &str = "octotask";
+
+/// The catalogs that tell an agent where the plugin is. Claude Code and the `skills`
+/// installer read the first one. Codex reads the second one, and no other once it is there.
+const MARKETPLACES: [&str; 2] = [
+    ".claude-plugin/marketplace.json",
+    ".agents/plugins/marketplace.json",
+];
+
+/// The schema a `plugin.json` must name for Codex to read it at the root of a plugin.
+const PLUGIN_SCHEMA: &str = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json";
+
+/// The fields that schema allows. It refuses any other.
+const PLUGIN_FIELDS: [&str; 10] = [
+    "$schema",
+    "name",
+    "version",
+    "description",
+    "author",
+    "homepage",
+    "repository",
+    "license",
+    "keywords",
+    "extensions",
+];
 
 /// What ends a command written inside a sentence, a code span or a shell line.
 const COMMAND_END: [char; 7] = ['`', '|', ';', '&', ')', '"', '\n'];
@@ -17,12 +43,21 @@ fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
+fn plugin_dir() -> PathBuf {
+    repo_root().join("plugins").join(SKILL)
+}
+
+/// Claude Code and Codex both look for the skills of a plugin in its `skills` folder.
 fn skill_dir() -> PathBuf {
-    repo_root().join("skills").join(SKILL)
+    plugin_dir().join("skills").join(SKILL)
 }
 
 fn read(path: &Path) -> String {
     fs::read_to_string(path).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+}
+
+fn read_json(path: &Path) -> serde_json::Value {
+    serde_json::from_str(&read(path)).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
 }
 
 /// The pages an agent reads: the skill and its references.
@@ -195,16 +230,62 @@ fn the_skill_links_only_to_pages_it_ships() {
 }
 
 #[test]
-fn the_plugin_marketplace_points_at_the_skill() {
-    let marketplace = read(&repo_root().join(".claude-plugin/marketplace.json"));
-    let marketplace: serde_json::Value = serde_json::from_str(&marketplace).unwrap();
+fn every_marketplace_points_at_the_plugin() {
+    for marketplace in MARKETPLACES {
+        let catalog = read_json(&repo_root().join(marketplace));
+        assert_eq!(catalog["name"], SKILL, "{marketplace}");
+        let plugins = catalog["plugins"].as_array().unwrap();
+        assert_eq!(plugins.len(), 1, "{marketplace}");
+        assert_eq!(plugins[0]["name"], SKILL, "{marketplace}");
 
-    let plugins = marketplace["plugins"].as_array().unwrap();
-    assert_eq!(plugins.len(), 1);
-    assert_eq!(plugins[0]["name"], SKILL);
-    let source = plugins[0]["source"].as_str().unwrap();
-    assert!(
-        repo_root().join(source).join("SKILL.md").is_file(),
-        "`{source}` has no SKILL.md"
+        // The folder is written alone, or as the `path` of a source that says its kind.
+        let source = &plugins[0]["source"];
+        let path = source.as_str().or_else(|| source["path"].as_str());
+        let path = path.unwrap_or_else(|| panic!("{marketplace}: the source names no folder"));
+        let folder = path
+            .strip_prefix("./")
+            .unwrap_or_else(|| panic!("{marketplace}: `{path}` does not start with `./`"));
+        assert_eq!(
+            repo_root().join(folder).canonicalize().unwrap(),
+            plugin_dir().canonicalize().unwrap(),
+            "{marketplace}: `{path}` is not the folder of the plugin"
+        );
+    }
+}
+
+#[test]
+fn the_codex_marketplace_says_how_the_plugin_is_installed() {
+    let catalog = read_json(&repo_root().join(".agents/plugins/marketplace.json"));
+    let plugin = &catalog["plugins"][0];
+
+    assert_eq!(plugin["source"]["source"], "local");
+    assert_eq!(plugin["policy"]["installation"], "AVAILABLE");
+    assert_eq!(plugin["policy"]["authentication"], "ON_INSTALL");
+    let category = plugin["category"].as_str().unwrap_or_default();
+    assert!(!category.is_empty(), "the plugin has no category");
+}
+
+#[test]
+fn the_plugin_manifest_follows_the_agent_plugins_format() {
+    let manifest = read_json(&plugin_dir().join("plugin.json"));
+
+    assert_eq!(manifest["$schema"], PLUGIN_SCHEMA);
+    assert_eq!(manifest["name"], SKILL);
+    for field in manifest.as_object().unwrap().keys() {
+        assert!(
+            PLUGIN_FIELDS.contains(&field.as_str()),
+            "`{field}` is not a field of the format"
+        );
+    }
+}
+
+#[test]
+fn the_plugin_has_the_version_of_octok() {
+    let manifest = read_json(&plugin_dir().join("plugin.json"));
+
+    assert_eq!(
+        manifest["version"],
+        env!("CARGO_PKG_VERSION"),
+        "`plugins/octotask/plugin.json` must carry the version of `Cargo.toml`"
     );
 }
