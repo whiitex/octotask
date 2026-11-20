@@ -127,7 +127,7 @@ repos:
 workspaces:
   feat-cart  /Users/you/.octotask/workspaces/shop/feat-cart
     shop-frontend (frontend)  (detached)  1ec5189  Add cart page (2 days ago)
-    shop-backend (backend)    cannot be read: fatal: not a git repository: /Users/you/.octotask/cache/shop/shop-backend.git/worktrees/shop-backend
+    shop-backend (backend)    cannot be read: fatal: [..]
     shop-agent (agent)        no worktree: add it with `octok checkout <branch>`
 
 orphan caches (not in the project file):
@@ -140,6 +140,7 @@ Reading the output from the top:
 - `shop-backend` has no clone anymore, so it was never fetched as far as `octok` can tell: `octok fetch` clones it again.
 - The checkout of `shop-frontend` is on a detached HEAD, so it shows `(detached)` and no `[not on the remote]` marker.
 - The checkout of `shop-backend` cannot be read, because its commits lived in the clone that is gone.
+  After `cannot be read:` comes the error of `git` as it is, shown here as `[..]` because its text changes with the version of `git`.
   The other rows are not affected.
 - `shop-agent` has no checkout in `feat-cart`, because it was registered after it.
   The hint says `<branch>` here only because no checkout of the workspace has a branch left to read: it is the name of the branch otherwise.
