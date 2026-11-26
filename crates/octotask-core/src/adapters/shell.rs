@@ -12,6 +12,8 @@ use crate::{Error, Location, Result};
 /// `$2`. It stops them when stdin closes: that is how octok asks for a stop, and what
 /// happens by itself when octok dies.
 ///
+/// Stdin starts with the env of the commands, as `NAME=value` lines and an empty one: not argv.
+///
 /// A stop is SIGTERM to the whole process group, and SIGKILL ten seconds later to what
 /// is still there. The group gets the same treatment when the commands end by themselves,
 /// so nothing they started outlives them.
@@ -25,6 +27,10 @@ use crate::{Error, Location, Result};
 /// The signals go to group `0`, the one of this shell: it must have a group of its own.
 const SUPERVISOR: &str = r#"
 dir=$1 run=$2 setup=$3 silence=$4
+set --
+while IFS= read -r assignment && [ -n "$assignment" ]; do
+    set -- "$@" "$assignment"
+done
 cd "$dir" || exit
 exec 3<&0
 trap 'stopping=1' TERM
@@ -60,12 +66,21 @@ await_stop() {
 } >/dev/null 2>&1 &
 exec 3<&-
 
-# Runs a command to its end and leaves its exit status in `$status`.
-# A trapped signal ends `wait` early, with the command still running.
+# Runs the command `$1` to its end, with the environment `$2...`, and leaves its exit status
+# in `$status`. A trapped signal ends `wait` early, with the command still running.
 # `dash` writes `Terminated` for a command that a signal ended: octok reports that itself.
+# Exported in a subshell, not given to `env`, whose argv `ps` shows; the command stays last.
 supervised() {
     printf '$ %s\n' "$1"
-    sh -c "$1" </dev/null &
+    (
+        set -- "$@" "$1"
+        shift
+        while [ "$#" -gt 1 ]; do
+            export "$1"
+            shift
+        done
+        exec sh -c "$1"
+    ) </dev/null &
     command=$!
     wait "$command" 2>/dev/null
     status=$?
@@ -79,12 +94,12 @@ status=0
 if [ -n "$setup" ]; then
     marker=$(git rev-parse --git-dir)/octok-setup || exit
     if [ "$(cat "$marker" 2>/dev/null)" != "$(printf '%s' "$setup")" ]; then
-        supervised "$setup"
+        supervised "$setup" "$@"
         [ "$status" -ne 0 ] || printf '%s\n' "$setup" >"$marker"
     fi
 fi
 if [ "$status" -eq 0 ] && [ -z "$stopping" ]; then
-    supervised "$run"
+    supervised "$run" "$@"
 fi
 [ -n "$stopping" ] || kill -TERM 0
 exit "$status"
@@ -100,6 +115,8 @@ pub(crate) struct Commands<'a> {
     pub(crate) run: &'a str,
     /// Run before `run` until it succeeds once, and again when it changes.
     pub(crate) setup: Option<&'a str>,
+    /// The environment of both, by name. No name or value holds a newline.
+    pub(crate) env: Vec<(String, String)>,
 }
 
 /// Shell commands left running on the machine of a location.
@@ -127,7 +144,9 @@ pub(crate) fn supervise(
     let silence = if is_remote { SILENCE_LIMIT } else { "" };
     let args = ["-c", SUPERVISOR, "sh", &dir, commands.run, setup, silence];
     let (mut process, output) = spawn_piped("sh", Place::machine(location), &args)?;
-    let stdin = process.stdin.take().expect("stdin is piped");
+    let mut stdin = process.stdin.take().expect("stdin is piped");
+    // A supervisor that died already closed its end: its exit is what octok then reports.
+    let _ = stdin.write_all(env_block(&commands.env).as_bytes());
     let lifeline = Lifeline {
         stdin: Arc::new(Mutex::new(Some(stdin))),
     };
@@ -165,6 +184,16 @@ pub(crate) fn run_script(
         },
         other => other,
     })
+}
+
+/// The first lines the supervisor reads: `NAME=value` each, then an empty line.
+fn env_block(env: &[(String, String)]) -> String {
+    let mut block: String = env
+        .iter()
+        .map(|(name, value)| format!("{name}={value}\n"))
+        .collect();
+    block.push('\n');
+    block
 }
 
 impl Drop for Lifeline {

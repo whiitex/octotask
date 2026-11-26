@@ -179,6 +179,7 @@ Inside a checkout, `octok up --json` alone starts the workspace of that folder.
 
 The run command of a repository is set by the user and is never printed, so the only way to know that one is missing is to try.
 Exit 3 with `nothing_to_run` or `no_run_command` means a repository has none: ask the user for it, and do not make one up.
+Exit 3 with `undefined_variable` means an env value reads one that is not set: tell the user which one, from `error.variable`, and do not invent a value.
 
 ## Install
 

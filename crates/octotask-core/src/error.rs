@@ -19,6 +19,20 @@ pub enum Error {
     },
     #[error("invalid location `{value}`: {reason}")]
     InvalidLocation { value: String, reason: &'static str },
+    #[error("invalid env `{name}` of repo `{repo}`: {reason}")]
+    InvalidEnv {
+        repo: String,
+        name: String,
+        reason: &'static str,
+    },
+    #[error("env `{name}` of repo `{repo}` uses `{{{{ {variable} }}}}`, which is not defined")]
+    UndefinedVariable {
+        repo: String,
+        name: String,
+        variable: String,
+    },
+    #[error("env values refer to each other in a loop: {}", .0.join(" -> "))]
+    EnvCycle(Vec<String>),
     #[error("invalid git url `{0}`")]
     InvalidUrl(String),
     #[error("cannot derive a repo key from `{0}`: choose one with `--name <key>`")]
@@ -194,6 +208,8 @@ impl Error {
         match self {
             Self::InvalidName { .. }
             | Self::InvalidLocation { .. }
+            | Self::InvalidEnv { .. }
+            | Self::EnvCycle(_)
             | Self::InvalidUrl(_)
             | Self::NoRepoKey(_)
             | Self::NoDefaultProject
@@ -211,6 +227,7 @@ impl Error {
             | Self::NothingToRun(_)
             | Self::NoRunCommand(_)
             | Self::NoWorktree { .. }
+            | Self::UndefinedVariable { .. }
             | Self::DevFileNotFound(_)
             | Self::TopicNotFound(_) => ErrorKind::NotFound,
             Self::WorkspaceHasWork { .. } => ErrorKind::WorkAtRisk,
@@ -254,6 +271,19 @@ impl Error {
                 "invalid_location",
                 json!({"value": value, "reason": reason}),
             ),
+            Self::InvalidEnv { repo, name, reason } => (
+                "invalid_env",
+                json!({"repo": repo, "name": name, "reason": reason}),
+            ),
+            Self::UndefinedVariable {
+                repo,
+                name,
+                variable,
+            } => (
+                "undefined_variable",
+                json!({"repo": repo, "name": name, "variable": variable}),
+            ),
+            Self::EnvCycle(chain) => ("env_cycle", json!({"chain": chain})),
             Self::InvalidUrl(url) => ("invalid_url", json!({"url": url})),
             Self::NoRepoKey(url) => ("no_repo_key", json!({"url": url})),
             Self::DuplicateRepo { key, url } => {

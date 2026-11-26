@@ -19,8 +19,9 @@ pub use home::Home;
 pub use workspaces::{
     Checkout, CheckoutOutcome, DevChanges, FetchOutcome, NewCheckout, NewRepo, NewWorkspace,
     PullOutcome, RepoChanges, RepoResult, RepoStatus, Running, Status, Stopper, UpEvent,
-    WorkspaceStatus, check_remote_branch, checkout_workspace, create_workspace, dev_changes,
-    fetch_repos, locate_workspace, pull_workspace, register_repo, remove_project, remove_workspace,
-    review_workspace, save_dev_changes, set_project_location, set_workspace_run, start_workspace,
-    status, unregister_repo, update_repo, workspace_name, workspace_path,
+    WorkspaceRepoChanges, WorkspaceStatus, check_remote_branch, checkout_workspace,
+    create_workspace, dev_changes, fetch_repos, locate_workspace, pull_workspace, register_repo,
+    remove_project, remove_workspace, review_workspace, save_dev_changes, set_project_location,
+    start_workspace, status, unregister_repo, update_repo, update_workspace_repo, workspace_name,
+    workspace_path,
 };

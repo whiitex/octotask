@@ -1,5 +1,6 @@
 //! Projects and the global config: the model and its YAML files under the home.
 
+mod env;
 mod location;
 mod project;
 mod registry;

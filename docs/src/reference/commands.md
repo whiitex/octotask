@@ -168,7 +168,7 @@ Usage: octok repo ls [OPTIONS]
 Change the alias, the base branch, the url, the location or the commands of a repo
 
 ```text
-Usage: octok repo set [OPTIONS] <--alias <ALIAS>|--no-alias|--base <BASE>|--no-base|--url <URL>|--location <LOCATION>|--no-location|--setup <SETUP>|--no-setup|--run <RUN>|--no-run|--branch <BRANCH>> <REPO>
+Usage: octok repo set [OPTIONS] <--alias <ALIAS>|--no-alias|--base <BASE>|--no-base|--url <URL>|--location <LOCATION>|--no-location|--setup <SETUP>|--no-setup|--run <RUN>|--no-run|--env <NAME=VALUE>|--no-env <NAME>|--branch <BRANCH>> <REPO>
 ```
 
 Arguments:
@@ -188,7 +188,9 @@ Options:
 - `--no-setup`: Remove the setup command
 - `--run <RUN>`: Shell command that `octok up` runs in the checkout to start the repo
 - `--no-run`: Remove the run command
-- `--branch <BRANCH>`: Change the run command in the workspace of this branch only
+- `--env <NAME=VALUE>`: Env value of the setup and run commands, e.g. `PORT=9008`: can be repeated. A value can read others, e.g. `{{repos.backend.env.PORT}}`
+- `--no-env <NAME>`: Remove an env value: can be repeated
+- `--branch <BRANCH>`: Change the run command and the env values in the workspace of this branch only
 
 ## `octok repo rm`
 

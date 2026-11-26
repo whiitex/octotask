@@ -10,8 +10,8 @@ mod workspace;
 pub use dev::{DevChanges, dev_changes, save_dev_changes};
 pub use project::{remove_project, set_project_location};
 pub use repos::{
-    FetchOutcome, NewRepo, RepoChanges, RepoResult, check_remote_branch, fetch_repos,
-    register_repo, set_workspace_run, unregister_repo, update_repo,
+    FetchOutcome, NewRepo, RepoChanges, RepoResult, WorkspaceRepoChanges, check_remote_branch,
+    fetch_repos, register_repo, unregister_repo, update_repo, update_workspace_repo,
 };
 pub use up::{Running, Stopper, UpEvent, start_workspace};
 pub use workspace::{

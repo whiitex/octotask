@@ -643,3 +643,186 @@ fn a_review_needs_known_repos_and_valid_branches() {
     ));
     assert!(project.workspaces.is_empty());
 }
+
+fn env_of(project: &Project, key: &str, workspace: &str) -> Vec<(String, String)> {
+    project
+        .effective_env(key, workspace)
+        .into_iter()
+        .map(|(name, value)| (name.to_string(), value.to_string()))
+        .collect()
+}
+
+fn pairs(values: &[(&str, &str)]) -> Vec<(String, String)> {
+    values
+        .iter()
+        .map(|(name, value)| (name.to_string(), value.to_string()))
+        .collect()
+}
+
+#[test]
+fn env_of_a_repo_is_set_and_removed() {
+    let mut project = project_with_backend();
+
+    project
+        .set_repo_env("backend", "PORT", Some("9008"))
+        .unwrap();
+    assert_eq!(
+        env_of(&project, "backend", "any"),
+        pairs(&[("PORT", "9008")])
+    );
+
+    project.set_repo_env("backend", "PORT", None).unwrap();
+    assert!(project.effective_env("backend", "any").is_empty());
+    let yaml = serde_saphyr::to_string(&project).unwrap();
+    assert!(!yaml.contains("env:"), "{yaml}");
+}
+
+#[test]
+fn env_of_a_workspace_overrides_and_extends_the_one_of_the_repo() {
+    let mut project = project_with_backend();
+    project
+        .set_repo_env("backend", "PORT", Some("9008"))
+        .unwrap();
+    project
+        .set_repo_env("backend", "DB_PORT", Some("5432"))
+        .unwrap();
+
+    project
+        .set_workspace_env("feat-login", "backend", "PORT", Some("9009"))
+        .unwrap();
+    project
+        .set_workspace_env("feat-login", "backend", "EXTRA", Some("1"))
+        .unwrap();
+
+    assert_eq!(
+        env_of(&project, "backend", "feat-login"),
+        pairs(&[("PORT", "9009"), ("DB_PORT", "5432"), ("EXTRA", "1")])
+    );
+    assert_eq!(
+        env_of(&project, "backend", "feat-other"),
+        pairs(&[("PORT", "9008"), ("DB_PORT", "5432")])
+    );
+}
+
+#[test]
+fn removing_the_last_env_of_a_workspace_drops_its_entry() {
+    let mut project = project_with_backend();
+    project
+        .set_workspace_env("feat-login", "backend", "PORT", Some("9009"))
+        .unwrap();
+
+    project
+        .set_workspace_env("feat-login", "backend", "PORT", None)
+        .unwrap();
+
+    assert!(project.workspaces.is_empty());
+}
+
+#[test]
+fn a_workspace_with_env_keeps_its_entry_when_its_run_command_is_removed() {
+    let mut project = project_with_backend();
+    project
+        .set_workspace_run("feat-login", "backend", Some("uv run main.py"))
+        .unwrap();
+    project
+        .set_workspace_env("feat-login", "backend", "PORT", Some("9009"))
+        .unwrap();
+
+    project
+        .set_workspace_run("feat-login", "backend", None)
+        .unwrap();
+
+    assert_eq!(
+        env_of(&project, "backend", "feat-login"),
+        pairs(&[("PORT", "9009")])
+    );
+}
+
+fn env_refusal(result: octotask_core::Result<()>) -> (String, &'static str) {
+    match result {
+        Err(Error::InvalidEnv { name, reason, .. }) => (name, reason),
+        other => panic!("expected InvalidEnv, got {other:?}"),
+    }
+}
+
+#[test]
+fn env_names_and_values_are_checked() {
+    let mut project = project_with_backend();
+    let before = project.clone();
+    let bad_name = "must start with a letter or `_` and contain only letters, digits and `_`";
+
+    for name in ["1PORT", "MY-PORT", ""] {
+        let refusals = [
+            project.set_repo_env("backend", name, Some("1")),
+            project.set_workspace_env("feat-login", "backend", name, Some("1")),
+        ];
+        for refusal in refusals {
+            assert_eq!(env_refusal(refusal), (name.to_string(), bad_name));
+        }
+    }
+    let bad_values = [
+        ("a\nb", "must not contain a newline or a NUL character"),
+        ("a\0b", "must not contain a newline or a NUL character"),
+        ("{{ workspace.name", "has `{{` without `}}`"),
+        ("{{ repo.backend.env.PORT }}", "uses an unknown variable"),
+        ("{{ repos.backend.PORT }}", "uses an unknown variable"),
+        ("{{}}", "uses an unknown variable"),
+    ];
+    for (value, reason) in bad_values {
+        let refusals = [
+            project.set_repo_env("backend", "PORT", Some(value)),
+            project.set_workspace_env("feat-login", "backend", "PORT", Some(value)),
+        ];
+        for refusal in refusals {
+            assert_eq!(
+                env_refusal(refusal),
+                ("PORT".to_string(), reason),
+                "{value:?}"
+            );
+        }
+    }
+    assert_eq!(project, before);
+}
+
+#[test]
+fn env_values_may_use_every_known_variable_and_plain_braces() {
+    let mut project = project_with_backend();
+
+    for value in [
+        "{{project.name}}-{{ workspace.name }}-{{workspace.slug}}",
+        "http://localhost:{{repos.backend.env.PORT}}",
+        "{{ repos.nope.env.LATER }}",
+        "{a} } {",
+        "",
+    ] {
+        project
+            .set_repo_env("backend", "VALUE", Some(value))
+            .unwrap_or_else(|error| panic!("{value:?}: {error}"));
+    }
+}
+
+#[test]
+fn env_of_an_unknown_repo_is_refused() {
+    let mut project = project_with_backend();
+
+    let errors = [
+        project.set_repo_env("nope", "PORT", Some("1")),
+        project.set_workspace_env("feat-login", "nope", "PORT", Some("1")),
+    ];
+    for err in errors.map(Result::unwrap_err) {
+        assert!(matches!(err, Error::RepoNotFound(_)), "{err:?}");
+    }
+    assert!(project.workspaces.is_empty());
+}
+
+#[test]
+fn removing_a_repo_drops_its_env_in_every_workspace() {
+    let mut project = project_with_backend();
+    project
+        .set_workspace_env("feat-login", "backend", "PORT", Some("9009"))
+        .unwrap();
+
+    project.remove_repo("backend").unwrap();
+
+    assert!(project.workspaces.is_empty());
+}

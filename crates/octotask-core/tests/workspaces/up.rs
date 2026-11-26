@@ -371,3 +371,114 @@ fn up_starts_nothing_when_a_repo_to_run_has_no_worktree() {
     );
     assert!(!checkout(&fx, "frontend").join("started").exists());
 }
+
+fn set_env(fx: &Fixture, repo: &str, values: &[(&str, &str)]) {
+    fx.registry()
+        .update_project(PROJECT, |project| {
+            values
+                .iter()
+                .try_for_each(|(name, value)| project.set_repo_env(repo, name, Some(value)))
+        })
+        .unwrap();
+}
+
+#[test]
+fn setup_and_run_see_the_env_of_their_repo() {
+    let fx = workspace_with_commands(&[("backend", Some(r#"printf '%s\n' "$PORT""#))]);
+    set_setup(&fx, "backend", r#"printf '%s\n' "$PORT" > setup.out"#);
+    set_env(&fx, "backend", &[("PORT", "9008")]);
+
+    let (all_succeeded, seen) = run_to_the_end(&fx, false);
+
+    assert!(all_succeeded, "{:?}", seen.lines);
+    assert_eq!(seen.printed_by("backend"), ["9008"]);
+    let setup_out = fs::read_to_string(checkout(&fx, "backend").join("setup.out")).unwrap();
+    assert_eq!(setup_out, "9008\n");
+}
+
+#[test]
+fn the_env_of_the_workspace_wins_and_other_repos_are_read() {
+    let fx = workspace_with_commands(&[
+        ("backend", Some(r#"printf 'port=%s\n' "$PORT""#)),
+        ("frontend", Some(r#"printf 'api=%s\n' "$API""#)),
+    ]);
+    set_env(&fx, "backend", &[("PORT", "9008")]);
+    set_env(
+        &fx,
+        "frontend",
+        &[("API", "http://localhost:{{repos.backend.env.PORT}}")],
+    );
+    fx.registry()
+        .update_project(PROJECT, |project| {
+            project.set_workspace_env(WORKSPACE, "backend", "PORT", Some("9009"))
+        })
+        .unwrap();
+
+    let (all_succeeded, seen) = run_to_the_end(&fx, false);
+
+    assert!(all_succeeded, "{:?}", seen.lines);
+    assert_eq!(seen.printed_by("backend"), ["port=9009"]);
+    assert_eq!(seen.printed_by("frontend"), ["api=http://localhost:9009"]);
+}
+
+#[test]
+fn values_reach_the_command_unchanged() {
+    let value = r#"a b 'c' "d" $HOME ; e=f \n {x}"#;
+    let fx = workspace_with_commands(&[("backend", Some(r#"printf '%s\n' "$VALUE""#))]);
+    set_env(&fx, "backend", &[("VALUE", value), ("EMPTY", "")]);
+
+    let (all_succeeded, seen) = run_to_the_end(&fx, false);
+
+    assert!(all_succeeded, "{:?}", seen.lines);
+    assert_eq!(seen.printed_by("backend"), [value]);
+}
+
+#[test]
+fn env_names_of_the_supervisor_do_not_change_it() {
+    let fx = workspace_with_commands(&[("backend", Some(r#"printf '%s\n' "$stopping$status""#))]);
+    set_setup(&fx, "backend", "true");
+    let names = [
+        "dir",
+        "run",
+        "setup",
+        "silence",
+        "stopping",
+        "signaled",
+        "status",
+        "command",
+        "marker",
+        "beats",
+        "quiet",
+        "seen",
+        "now",
+        "assignment",
+    ];
+    let values: Vec<(&str, &str)> = names.iter().map(|name| (*name, "7")).collect();
+    set_env(&fx, "backend", &values);
+
+    let (all_succeeded, seen) = run_to_the_end(&fx, false);
+
+    assert!(all_succeeded, "{:?}", seen.lines);
+    assert_eq!(seen.printed_by("backend"), ["77"]);
+    assert!(seen.exit_of("backend").success());
+}
+
+#[test]
+fn an_undefined_variable_starts_nothing() {
+    let fx = workspace_with_commands(&[
+        ("backend", Some("echo started > started")),
+        ("frontend", Some("echo started > started")),
+    ]);
+    set_env(&fx, "frontend", &[("API", "{{repos.backend.env.PORT}}")]);
+
+    let err = start_error(&fx, &[]);
+
+    assert!(
+        matches!(&err, Error::UndefinedVariable { repo, .. } if repo == "frontend"),
+        "{err:?}"
+    );
+    thread::sleep(Duration::from_millis(200));
+    for repo in ["backend", "frontend"] {
+        assert!(!checkout(&fx, repo).join("started").exists(), "{repo}");
+    }
+}

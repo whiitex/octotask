@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
+use super::env::check_env;
 use super::location::Location;
 use crate::utils::CONFIG_VERSION;
 use crate::{Error, Result};
@@ -44,6 +45,9 @@ pub struct Repo {
     /// Shell command that starts the repo, run in its checkout.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run: Option<String>,
+    /// Environment of `setup` and `run`, by name. A value may read others through templates.
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub env: IndexMap<String, String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,6 +74,9 @@ pub struct WorkspaceRepo {
     /// The branch the repo has in this workspace, instead of the branch of the workspace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
+    /// Env values of the repo in this workspace, replacing or adding to the repo's own.
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub env: IndexMap<String, String>,
 }
 
 impl WorkspaceSettings {
@@ -79,7 +86,7 @@ impl WorkspaceSettings {
 
     fn drop_repos_without_settings(&mut self) {
         self.repos
-            .retain(|_, repo| repo.run.is_some() || repo.branch.is_some());
+            .retain(|_, repo| repo.run.is_some() || repo.branch.is_some() || !repo.env.is_empty());
     }
 }
 
@@ -136,6 +143,7 @@ impl Project {
                 location: None,
                 setup: None,
                 run: None,
+                env: IndexMap::new(),
             },
         );
         Ok(key)
@@ -257,6 +265,53 @@ impl Project {
         Ok(())
     }
 
+    /// Sets one env value of the repo. `None` removes it.
+    pub fn set_repo_env(&mut self, key: &str, name: &str, value: Option<&str>) -> Result<()> {
+        let repo = self.repo_mut(key)?;
+        match value {
+            Some(value) => {
+                checked_env(key, name, value)?;
+                repo.env.insert(name.to_string(), value.to_string());
+            }
+            None => {
+                repo.env.shift_remove(name);
+            }
+        }
+        Ok(())
+    }
+
+    /// Sets one env value of a repo in one workspace. `None` goes back to the repo's.
+    pub fn set_workspace_env(
+        &mut self,
+        workspace: &str,
+        key: &str,
+        name: &str,
+        value: Option<&str>,
+    ) -> Result<()> {
+        validate_workspace_name(workspace)?;
+        if !self.repos.contains_key(key) {
+            return Err(Error::RepoNotFound(key.to_string()));
+        }
+        match value {
+            Some(value) => {
+                checked_env(key, name, value)?;
+                let settings = self.workspaces.entry(workspace.to_string()).or_default();
+                let repo = settings.repos.entry(key.to_string()).or_default();
+                repo.env.insert(name.to_string(), value.to_string());
+            }
+            None => {
+                if let Some(settings) = self.workspaces.get_mut(workspace) {
+                    if let Some(repo) = settings.repos.get_mut(key) {
+                        repo.env.shift_remove(name);
+                    }
+                    settings.drop_repos_without_settings();
+                }
+                self.drop_workspace_without_settings(workspace);
+            }
+        }
+        Ok(())
+    }
+
     /// Saves what one workspace reviews: `branch` is its own, and `reviewed` has the
     /// branch of each repo that reviews another one, by repo key.
     pub fn set_review(
@@ -366,6 +421,20 @@ impl Project {
             .or_else(|| self.repos.get(key)?.run.as_deref())
     }
 
+    /// Raw env values of a repo in a workspace: the workspace's replace or follow the repo's.
+    pub fn effective_env(&self, key: &str, workspace: &str) -> IndexMap<&str, &str> {
+        let own = self.repos.get(key).into_iter().flat_map(|repo| &repo.env);
+        let of_workspace = self
+            .workspaces
+            .get(workspace)
+            .and_then(|settings| settings.repos.get(key))
+            .into_iter()
+            .flat_map(|repo| &repo.env);
+        own.chain(of_workspace)
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect()
+    }
+
     /// Every machine the project can have folders on, each one once, the project's own first.
     pub fn locations(&self) -> Vec<Location> {
         let project = self.location.as_ref().unwrap_or(&LOCAL);
@@ -409,6 +478,9 @@ impl Project {
                 if let Some(branch) = &repo.branch {
                     validate_branch(branch)?;
                 }
+                for (name, value) in &repo.env {
+                    checked_env(key, name, value)?;
+                }
             }
         }
         for (key, repo) in &self.repos {
@@ -426,6 +498,9 @@ impl Project {
             }
             checked_command("setup command", repo.setup.as_deref())?;
             checked_command("run command", repo.run.as_deref())?;
+            for (name, value) in &repo.env {
+                checked_env(key, name, value)?;
+            }
         }
         Ok(())
     }
@@ -548,6 +623,14 @@ fn checked_command(kind: &'static str, command: Option<&str>) -> Result<Option<S
         }),
         command => Ok(command.map(str::to_string)),
     }
+}
+
+fn checked_env(repo: &str, name: &str, value: &str) -> Result<()> {
+    check_env(name, value).map_err(|reason| Error::InvalidEnv {
+        repo: repo.to_string(),
+        name: name.to_string(),
+        reason,
+    })
 }
 
 /// A workspace is named after its branch, with `/` replaced: the name is one folder.

@@ -80,6 +80,8 @@ They are the same with and without `--json`.
 | `usage` | 2 | |
 | `invalid_name` | 2 | `kind`, `value`, `reason` |
 | `invalid_location` | 2 | `value`, `reason` |
+| `invalid_env` | 2 | `repo`, `name`, `reason` |
+| `env_cycle` | 2 | `chain` |
 | `invalid_url` | 2 | `url` |
 | `no_repo_key` | 2 | `url` |
 | `no_default_project` | 2 | |
@@ -97,6 +99,7 @@ They are the same with and without `--json`.
 | `nothing_to_run` | 3 | `workspace` |
 | `no_run_command` | 3 | `repo` |
 | `no_worktree` | 3 | `repo`, `workspace` |
+| `undefined_variable` | 3 | `repo`, `name`, `variable` |
 | `dev_file_not_found` | 3 | `file` |
 | `topic_not_found` | 3 | `topic` |
 | `workspace_has_work` | 4 | `workspace`, `reasons` |

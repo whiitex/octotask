@@ -26,6 +26,7 @@
 - [A feature across several repositories](guides/multi-repo-feature.md)
 - [Reviewing a pull request](guides/review-pull-request.md)
 - [Repositories on another machine](guides/remote-machine.md)
+- [A Docker Compose per workspace](guides/compose-per-workspace.md)
 
 # For AI agents
 

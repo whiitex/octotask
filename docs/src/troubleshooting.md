@@ -185,6 +185,9 @@ error: repo `shop-backend` has no `run` command: set one with `octok repo set sh
 
 - `` no repo of workspace `feat-login` has a `run` command: set one with `octok repo set <repo> --run <command>` `` (`nothing_to_run`, exit 3): no repository of the workspace says how it starts.
 - `` repo `shop-backend` has no `run` command: set one with `octok repo set shop-backend --run <command>` `` (`no_run_command`, exit 3): you named a repository without a run command.
+- `` env `API` of repo `shop-frontend` uses `{{ repos.backend.env.PORT }}`, which is not defined `` (`undefined_variable`, exit 3): the value reads a repository or a name that has no value in this workspace. Set it with `octok repo set backend --env PORT=<value>`, or with `--branch` for this workspace only.
+- `` env values refer to each other in a loop: shop-backend.A -> shop-backend.B -> shop-backend.A `` (`env_cycle`, exit 2): each value in the chain reads the next one. Change one of them so that it no longer does.
+- `` invalid env `<name>` of repo `<repo>`: <reason> `` (`invalid_env`, exit 2): a name must start with a letter or `_` and contain only letters, digits and `_`, a value must not contain a newline, and a template can only use the [variables](commands/up.md#shared-values) `octok` knows.
 - `repo ... has no worktree in workspace ...` is in the next section.
 
 When `octok up` runs, the line `<repo> | ended (exit status: N)` is how a repository ended, and `octok up` exits with 1 when any of them ended with a failure and 130 when you stopped it.
@@ -427,14 +430,10 @@ error: /Users/you/.octotask/projects/mismatch.yaml: file declares project `other
   Use the version that wrote it, or update `octok`.
 - `` <path>: file declares project `other` but is named after `mismatch` `` (`name_mismatch`, exit 1): the `name` in the file and the name of the file must be the same.
 - `<path>: <message>` (`parse`, exit 1): the file is not valid YAML, or lacks a field.
-  The message of the parser, with the line and the column, follows:
+  The message of the parser follows, with the line and the column but not the lines of the file, which can hold secret env values:
 
   ```text
-  error: /Users/you/.octotask/projects/broken.yaml: error: line 1 column 10: expected string scalar
-   --> <input>:1:10
-    |
-  1 | version: [
-    |          ^ expected string scalar
+  error: /Users/you/.octotask/projects/broken.yaml: expected string scalar at line 1, column 10
   ```
 - `<path>: cannot serialize: <message>` (`serialize`, exit 1): `octok` could not write a file.
   It is not expected in normal use.
