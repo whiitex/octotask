@@ -111,6 +111,17 @@ pub struct RepoChanges<'a> {
     pub setup: Option<Option<&'a str>>,
     /// `Some(None)` removes the run command.
     pub run: Option<Option<&'a str>>,
+    /// Env values by name: `None` removes one.
+    pub env: &'a [(&'a str, Option<&'a str>)],
+}
+
+/// What `octok repo set --branch` changes in one workspace. A field left to `None` is not touched.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WorkspaceRepoChanges<'a> {
+    /// `Some(None)` goes back to the run command of the repo.
+    pub run: Option<Option<&'a str>>,
+    /// Env values by name: `None` goes back to the value of the repo.
+    pub env: &'a [(&'a str, Option<&'a str>)],
 }
 
 /// Changes the settings of the repo with this key or alias. Returns its key.
@@ -168,19 +179,24 @@ pub fn update_repo(
     Ok(key)
 }
 
-/// Sets the command that starts the repo with this key or alias in the workspace of
-/// `branch` only. `None` goes back to the command of the repo. Returns the key of the repo.
-pub fn set_workspace_run(
+/// Changes the repo with this key or alias in the workspace of `branch`, which may not exist yet.
+pub fn update_workspace_repo(
     registry: &Registry,
     project_name: &str,
     name: &str,
     branch: &str,
-    command: Option<&str>,
+    changes: &WorkspaceRepoChanges,
 ) -> Result<String> {
     validate_branch(branch)?;
+    let workspace = workspace_name(branch);
     registry.update_project(project_name, |project| {
         let key = project.resolve_repo(name)?.to_string();
-        project.set_workspace_run(&workspace_name(branch), &key, command)?;
+        if let Some(run) = changes.run {
+            project.set_workspace_run(&workspace, &key, run)?;
+        }
+        apply_env(&key, changes.env, |name, value| {
+            project.set_workspace_env(&workspace, &key, name, value)
+        })?;
         Ok(key)
     })
 }
@@ -276,7 +292,30 @@ fn apply_changes(project: &mut Project, key: &str, changes: &RepoChanges) -> Res
     if let Some(run) = changes.run {
         project.set_repo_run(key, run)?;
     }
-    Ok(())
+    apply_env(key, changes.env, |name, value| {
+        project.set_repo_env(key, name, value)
+    })
+}
+
+/// Hands each env change to `set`, once none of them both sets and removes a name.
+fn apply_env(
+    key: &str,
+    env: &[(&str, Option<&str>)],
+    mut set: impl FnMut(&str, Option<&str>) -> Result<()>,
+) -> Result<()> {
+    for (name, value) in env {
+        let contradicts = |(other, other_value): &&(&str, Option<&str>)| {
+            other == name && other_value.is_some() != value.is_some()
+        };
+        if env.iter().any(|change| contradicts(&change)) {
+            return Err(Error::InvalidEnv {
+                repo: key.to_string(),
+                name: name.to_string(),
+                reason: "is both set and removed",
+            });
+        }
+    }
+    env.iter().try_for_each(|(name, value)| set(name, *value))
 }
 
 fn check_against_remote(

@@ -1,8 +1,8 @@
 use std::fs;
 
 use octotask_core::{
-    Error, FetchOutcome, NewRepo, RepoChanges, create_workspace, fetch_repos, register_repo,
-    set_workspace_run, unregister_repo, update_repo,
+    Error, FetchOutcome, NewRepo, RepoChanges, WorkspaceRepoChanges, create_workspace, fetch_repos,
+    register_repo, unregister_repo, update_repo, update_workspace_repo,
 };
 
 use super::{Fixture, PROJECT, commit_on, git, head, keep_project_base, refuse_missing_base};
@@ -609,25 +609,137 @@ fn the_run_command_of_a_repo_can_be_set_for_one_workspace() {
             .effective_run("frontend", workspace)
             .map(str::to_string)
     };
+    let set_run = |name: &str, command| {
+        let changes = WorkspaceRepoChanges {
+            run: Some(command),
+            ..Default::default()
+        };
+        update_workspace_repo(&fx.registry(), PROJECT, name, "feat/login", &changes)
+    };
 
-    let key = set_workspace_run(
-        &fx.registry(),
-        PROJECT,
-        "web",
-        "feat/login",
-        Some("npm run dev"),
-    )
-    .unwrap();
+    let key = set_run("web", Some("npm run dev")).unwrap();
     assert_eq!(key, "frontend");
     assert_eq!(run("feat-login").as_deref(), Some("npm run dev"));
     assert_eq!(run("feat-other"), None);
 
-    set_workspace_run(&fx.registry(), PROJECT, "web", "feat/login", None).unwrap();
+    set_run("web", None).unwrap();
     assert_eq!(run("feat-login"), None);
 
-    let err =
-        set_workspace_run(&fx.registry(), PROJECT, "nope", "feat/login", Some("x")).unwrap_err();
+    let err = set_run("nope", Some("x")).unwrap_err();
     assert!(matches!(err, Error::RepoNotFound(_)), "{err:?}");
+}
+
+fn env_of(fx: &Fixture, workspace: &str) -> Vec<(String, String)> {
+    fx.project()
+        .effective_env("frontend", workspace)
+        .into_iter()
+        .map(|(name, value)| (name.to_string(), value.to_string()))
+        .collect()
+}
+
+fn pairs(values: &[(&str, &str)]) -> Vec<(String, String)> {
+    values
+        .iter()
+        .map(|(name, value)| (name.to_string(), value.to_string()))
+        .collect()
+}
+
+#[test]
+fn update_repo_sets_and_removes_env() {
+    let fx = Fixture::new();
+    fx.register(&fx.remote("frontend"));
+    let update = |env: &[(&str, Option<&str>)]| {
+        let changes = RepoChanges {
+            env,
+            ..Default::default()
+        };
+        update_repo(&fx.registry(), PROJECT, "frontend", &changes, |_, _| false)
+    };
+
+    update(&[("PORT", Some("3000")), ("URL", Some("http://x/?a=b"))]).unwrap();
+    assert_eq!(
+        env_of(&fx, "any"),
+        pairs(&[("PORT", "3000"), ("URL", "http://x/?a=b")])
+    );
+
+    update(&[("URL", None)]).unwrap();
+    assert_eq!(env_of(&fx, "any"), pairs(&[("PORT", "3000")]));
+}
+
+#[test]
+fn update_workspace_repo_changes_run_and_env_of_one_workspace() {
+    let fx = Fixture::new();
+    fx.register(&fx.remote("frontend"));
+    fx.registry()
+        .update_project(PROJECT, |project| {
+            project.set_repo_env("frontend", "PORT", Some("3000"))
+        })
+        .unwrap();
+    let update = |changes: &WorkspaceRepoChanges| {
+        update_workspace_repo(&fx.registry(), PROJECT, "frontend", "feat/login", changes)
+    };
+
+    update(&WorkspaceRepoChanges {
+        run: Some(Some("npm run dev")),
+        env: &[("PORT", Some("3001"))],
+    })
+    .unwrap();
+    assert_eq!(env_of(&fx, "feat-login"), pairs(&[("PORT", "3001")]));
+    assert_eq!(env_of(&fx, "feat-other"), pairs(&[("PORT", "3000")]));
+    assert_eq!(
+        fx.project().effective_run("frontend", "feat-login"),
+        Some("npm run dev")
+    );
+
+    update(&WorkspaceRepoChanges {
+        run: Some(None),
+        env: &[("PORT", None)],
+    })
+    .unwrap();
+    assert_eq!(env_of(&fx, "feat-login"), pairs(&[("PORT", "3000")]));
+    assert!(fx.project().workspaces.is_empty());
+}
+
+#[test]
+fn a_name_both_set_and_removed_is_refused() {
+    let fx = Fixture::new();
+    fx.register(&fx.remote("frontend"));
+    let env: &[(&str, Option<&str>)] = &[("PORT", Some("1")), ("PORT", None)];
+    let before = fx.project();
+
+    let errors = [
+        update_repo(
+            &fx.registry(),
+            PROJECT,
+            "frontend",
+            &RepoChanges {
+                env,
+                ..Default::default()
+            },
+            |_, _| false,
+        )
+        .unwrap_err(),
+        update_workspace_repo(
+            &fx.registry(),
+            PROJECT,
+            "frontend",
+            "feat/login",
+            &WorkspaceRepoChanges {
+                env,
+                ..Default::default()
+            },
+        )
+        .unwrap_err(),
+    ];
+
+    for error in errors {
+        assert!(
+            matches!(&error, Error::InvalidEnv { name, reason, .. }
+                if name == "PORT" && *reason == "is both set and removed"),
+            "{error:?}"
+        );
+    }
+    assert_eq!(fx.project(), before);
 }
 
 #[test]

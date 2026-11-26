@@ -179,7 +179,9 @@ cloned at api-dev-1:/home/ubuntu/.octotask
 octok repo set <repo> [--alias <alias> | --no-alias] [--base <branch> | --no-base]
                [--url <url>] [--location <location> | --no-location]
                [--setup <command> | --no-setup] [--run <command> | --no-run]
-octok repo set <repo> (--run <command> | --no-run) --branch <branch>
+               [--env <name>=<value>]... [--no-env <name>]...
+octok repo set <repo> [--run <command> | --no-run] [--env <name>=<value>]... [--no-env <name>]...
+               --branch <branch>
 ```
 
 Changes the settings of one repository, given by key or alias.
@@ -200,7 +202,9 @@ With `--branch` it prints ``updated `<repo>` in workspace `<workspace>` of <proj
 | `--no-location` | Goes back to the location of the project. |
 | `--setup <command>`, `--no-setup` | Sets or removes the command that prepares a checkout. See [Running](up.md). |
 | `--run <command>`, `--no-run` | Sets or removes the command that starts the repository. See [Running](up.md). |
-| `--branch <branch>` | With `--run` or `--no-run` only: changes the run command in the workspace of that branch alone. See [Running](up.md). |
+| `--env <name>=<value>` | Sets an env value of the setup and run commands. Can be repeated. See [shared values](up.md#shared-values). |
+| `--no-env <name>` | Removes an env value. Can be repeated. Setting and removing the same name in one command is refused with exit code 2. |
+| `--branch <branch>` | With `--run`, `--no-run`, `--env` and `--no-env` only: changes the run command and the env values in the workspace of that branch alone. See [Running](up.md). |
 
 ```console
 $ octok repo set agent --alias agent

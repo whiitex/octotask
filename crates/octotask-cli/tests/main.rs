@@ -2,6 +2,7 @@ use std::env;
 use std::ffi::OsString;
 use std::fs;
 use std::io::{BufRead, BufReader};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
@@ -2297,6 +2298,245 @@ fn repo_set_with_a_branch_changes_the_run_command_of_that_workspace_only() {
     ])
     .assert()
     .code(2);
+}
+
+#[test]
+fn repo_set_changes_the_env_of_a_repo_and_of_a_workspace() {
+    let env = Env::with_repos(&["frontend"]);
+    let run = r#"printf '%s %s\n' "$PORT" "$URL""#;
+    env.octok(&["repo", "set", "frontend", "--alias", "web", "--run", run])
+        .assert()
+        .success();
+    env.octok(&["branch", "feat/login"]).assert().success();
+    let up = |branch: &str| env.stdout(&["up", "--branch", branch]);
+
+    env.octok(&[
+        "repo",
+        "set",
+        "web",
+        "--env",
+        "PORT=9008",
+        "--env",
+        "URL=http://x/?a=b",
+    ])
+    .assert()
+    .success()
+    .stdout("updated `frontend (web)` in deeptree\n");
+    assert!(
+        env.read("projects/deeptree.yaml")
+            .contains("    env:\n      PORT: \"9008\"\n      URL: http://x/?a=b\n"),
+        "{}",
+        env.read("projects/deeptree.yaml")
+    );
+    assert!(up("feat/login").contains("web | 9008 http://x/?a=b\n"));
+
+    env.octok(&["repo", "set", "web", "--no-env", "URL"])
+        .assert()
+        .success();
+    env.octok(&[
+        "repo",
+        "set",
+        "web",
+        "--env",
+        "PORT=9009",
+        "--branch",
+        "feat/login",
+    ])
+    .assert()
+    .success()
+    .stdout("updated `frontend` in workspace `feat-login` of deeptree\n");
+    let yaml = env.read("projects/deeptree.yaml");
+    assert!(
+        yaml.contains(
+            "workspaces:\n  feat-login:\n    repos:\n      frontend:\n        env:\n          PORT: \"9009\"\n"
+        ),
+        "{yaml}"
+    );
+    assert!(up("feat/login").contains("web | 9009 \n"));
+
+    env.octok(&[
+        "repo",
+        "set",
+        "web",
+        "--no-env",
+        "PORT",
+        "--branch",
+        "feat/login",
+    ])
+    .assert()
+    .success();
+    assert!(up("feat/login").contains("web | 9008 \n"));
+    assert!(!env.read("projects/deeptree.yaml").contains("workspaces"));
+}
+
+#[test]
+fn repo_set_rejects_a_bad_env() {
+    let env = Env::with_repos(&["frontend"]);
+
+    env.octok(&["repo", "set", "frontend", "--env", "PORT"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "invalid value 'PORT' for '--env <NAME=VALUE>': expected `<name>=<value>`, e.g. `PORT=9008`",
+        ));
+    env.octok(&["repo", "set", "frontend", "--env", "1X=y"])
+        .assert()
+        .code(2)
+        .stderr("error: invalid env `1X` of repo `frontend`: must start with a letter or `_` and contain only letters, digits and `_`\n");
+    env.octok(&[
+        "repo",
+        "set",
+        "frontend",
+        "--env",
+        "API={{ repo.backend.env.PORT }}",
+    ])
+    .assert()
+    .code(2)
+    .stderr("error: invalid env `API` of repo `frontend`: uses an unknown variable\n");
+    env.octok(&["repo", "set", "frontend", "--env", "A=1", "--no-env", "A"])
+        .assert()
+        .code(2)
+        .stderr("error: invalid env `A` of repo `frontend`: is both set and removed\n");
+    env.octok(&[
+        "repo",
+        "set",
+        "frontend",
+        "--env",
+        "A=1",
+        "--alias",
+        "w",
+        "--branch",
+        "feat/login",
+    ])
+    .assert()
+    .code(2);
+    assert!(!env.read("projects/deeptree.yaml").contains("env"));
+}
+
+#[test]
+fn repo_set_json_never_shows_env_values() {
+    let env = Env::with_repos(&["frontend"]);
+
+    for args in [
+        &["repo", "set", "frontend", "--env", "TOKEN=s3cr3t", "--json"][..],
+        &[
+            "repo",
+            "set",
+            "frontend",
+            "--env",
+            "TOKEN=s3cr3t",
+            "--branch",
+            "feat/login",
+            "--json",
+        ],
+        &["repo", "ls", "--json"],
+    ] {
+        let (code, document) = env.document(args);
+        assert_eq!(code, Some(0), "{document}");
+        assert!(!document.to_string().contains("s3cr3t"), "{document}");
+    }
+}
+
+#[test]
+fn up_passes_the_env_to_a_repo_on_the_other_machine() {
+    let env = Env::with_repos(&[]);
+    env.octok(&["repo", "add", &env.remote("backend"), "--location", "vm"])
+        .assert()
+        .success();
+    env.octok(&[
+        "repo",
+        "set",
+        "backend",
+        "--run",
+        r#"printf '%s|%s\n' "$PORT" "$TOKEN""#,
+        "--env",
+        "PORT=9008",
+        "--env",
+        "TOKEN=s3cr3t 'quoted' $HOME",
+    ])
+    .assert()
+    .success();
+    env.octok(&["branch", "feat/login"]).assert().success();
+
+    let printed = env.stdout(&["up", "--branch", "feat/login"]);
+
+    assert!(
+        printed.ends_with("backend | 9008|s3cr3t 'quoted' $HOME\n"),
+        "{printed}"
+    );
+    let ssh_log = fs::read_to_string(env.machine_file("ssh.log")).unwrap();
+    assert!(!ssh_log.contains("s3cr3t"), "{ssh_log}");
+}
+
+#[test]
+fn env_values_never_become_arguments_of_a_process() {
+    let env = Env::with_repos(&["frontend"]);
+    let log = env.machine_dir().join("env-args.log");
+    let fake_env = env.machine_dir().join("bin/env");
+    fs::write(
+        &fake_env,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexec /usr/bin/env \"$@\"\n",
+            log.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&fake_env, fs::Permissions::from_mode(0o755)).unwrap();
+    env.octok(&[
+        "repo",
+        "set",
+        "frontend",
+        "--run",
+        r#"printf '%s\n' "$TOKEN""#,
+        "--env",
+        "TOKEN=s3cr3t",
+    ])
+    .assert()
+    .success();
+    env.octok(&["branch", "feat/login"]).assert().success();
+
+    let printed = env.stdout(&["up", "--branch", "feat/login"]);
+
+    assert!(printed.ends_with("frontend | s3cr3t\n"), "{printed}");
+    let arguments = fs::read_to_string(&log).unwrap_or_default();
+    assert!(!arguments.contains("s3cr3t"), "{arguments}");
+}
+
+#[test]
+fn up_with_an_undefined_variable_fails_before_starting() {
+    let env = Env::with_repos(&["frontend", "backend"]);
+    env.octok(&["repo", "set", "backend", "--run", "echo started > started"])
+        .assert()
+        .success();
+    env.octok(&[
+        "repo",
+        "set",
+        "frontend",
+        "--run",
+        "echo started > started",
+        "--env",
+        "API=http://localhost:{{repos.backend.env.PORT}}",
+    ])
+    .assert()
+    .success();
+    env.octok(&["branch", "feat/login"]).assert().success();
+    let message =
+        "env `API` of repo `frontend` uses `{{ repos.backend.env.PORT }}`, which is not defined";
+
+    env.octok(&["up", "--branch", "feat/login"])
+        .assert()
+        .code(3)
+        .stdout("")
+        .stderr(format!("error: {message}\n"));
+    let (code, failure) = env.document(&["up", "--branch", "feat/login", "--json"]);
+    assert_eq!(code, Some(3));
+    assert_eq!(failure["error"]["code"], "undefined_variable");
+    assert_eq!(failure["error"]["message"], message);
+    assert_eq!(failure["error"]["variable"], "repos.backend.env.PORT");
+    let workspace = env.dir.path().join("workspaces/deeptree/feat-login");
+    for repo in ["frontend", "backend"] {
+        assert!(!workspace.join(repo).join("started").exists(), "{repo}");
+    }
 }
 
 #[test]

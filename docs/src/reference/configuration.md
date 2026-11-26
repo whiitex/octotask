@@ -193,6 +193,7 @@ Each entry of `repos` is a repository, under its key.
 | `location` | no | Where this repository lives, instead of the location of the project. |
 | `setup` | no | The shell command `octok up` runs to prepare a checkout before its first run, such as `npm ci`. |
 | `run` | no | The shell command `octok up` runs to start the repository, in its checkout. |
+| `env` | no | The env values of `setup` and `run`, by name. A value can read others with templates: see [shared values](../commands/up.md#shared-values). Set by `octok repo set --env`. |
 
 ### Workspaces
 
@@ -211,6 +212,7 @@ Each entry of a workspace `repos` has:
 |---|---|---|
 | `run` | no | The command that starts the repository in this workspace, instead of the `run` of the repository. Set by `octok repo set --run --branch`. |
 | `branch` | no | The branch the repository has in this workspace, instead of the branch of the workspace. Saved by `octok pr review`. |
+| `env` | no | Env values of the repository in this workspace: each replaces the value of the repository with the same name, or adds one. Set by `octok repo set --env --branch`. |
 
 The workspace entry of a review stays until `octok rm`, which also forgets the other settings of that workspace: see [Pull request review](../commands/pr-review.md).
 
@@ -285,32 +287,16 @@ $ octok status
 error: /Users/you/.octotask/projects/shop.yaml: file declares project `other` but is named after `shop`
 $ printf 'version: 1\nname: shop\nbase: staging\nrepo: {}\n' > .octotask/projects/shop.yaml
 $ octok status
-error: /Users/you/.octotask/projects/shop.yaml: error: line 4 column 1: unknown field `repo`, expected one of version, name, base, location, repos, workspaces
- --> <input>:4:1
-  |
-2 | name: shop
-3 | base: staging
-4 | repo: {}
-  | ^ unknown field `repo`, expected one of version, name, base, location, repos, workspaces
+error: /Users/you/.octotask/projects/shop.yaml: unknown field `repo`, expected one of version, name, base, location, repos, workspaces at line 4, column 1
 $ printf 'version: 1\nname: shop\nbase: staging\nlocation: api-dev-1\n' > .octotask/projects/shop.yaml
 $ octok status
-error: /Users/you/.octotask/projects/shop.yaml: error: line 4 column 11: invalid location `api-dev-1`: expected `local` or `<host>:<absolute path>`
- --> <input>:4:11
-  |
-2 | name: shop
-3 | base: staging
-4 | location: api-dev-1
-  |           ^ invalid location `api-dev-1`: expected `local` or `<host>:<absolute path>`
+error: /Users/you/.octotask/projects/shop.yaml: invalid location `api-dev-1`: expected `local` or `<host>:<absolute path>` at line 4, column 11
 $ printf 'version: 1\nname: shop\nbase: staging\nworkspaces:\n  feat-x:\n    repos:\n      ghost:\n        run: x\n' > .octotask/projects/shop.yaml
 $ octok status
 error: repo `ghost` is not registered
 $ printf 'oops: 1\n' > .octotask/config.yaml
 $ octok project ls
-error: /Users/you/.octotask/config.yaml: error: line 1 column 1: missing field `version`
- --> <input>:1:1
-  |
-1 | oops: 1
-  | ^ missing field `version`
+error: /Users/you/.octotask/config.yaml: missing field `version` at line 1, column 1
 $ printf 'version: 3\n' > .octotask/config.yaml
 $ octok project ls
 error: /Users/you/.octotask/config.yaml: unsupported config version 3 (expected 1)

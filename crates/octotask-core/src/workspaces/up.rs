@@ -169,7 +169,8 @@ fn repos_to_run<'a>(
             });
         }
         let setup = member.repo.setup.as_deref();
-        to_run.push((member, Commands { run, setup }));
+        let env = project.resolved_env(member.key, workspace)?;
+        to_run.push((member, Commands { run, setup, env }));
     }
     if to_run.is_empty() {
         return Err(Error::NothingToRun(workspace.to_string()));

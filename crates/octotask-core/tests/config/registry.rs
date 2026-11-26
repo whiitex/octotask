@@ -561,3 +561,58 @@ fn a_review_is_written_under_its_workspace_and_survives_a_reload() {
         Some(("review/login", reviewed))
     );
 }
+
+#[test]
+fn load_reads_a_hand_written_number_in_env_as_text() {
+    let (dir, reg) = registry();
+    reg.init_project("deeptree", "develop").unwrap();
+    let path = dir.path().join("octotask-home/projects/deeptree.yaml");
+    fs::write(
+        &path,
+        "version: 1\nname: deeptree\nbase: develop\nrepos:\n  backend:\n    url: git@github.com:org/backend.git\n    env:\n      PORT: 9008\n      DEBUG: true\nworkspaces:\n  feat-login:\n    repos:\n      backend:\n        env:\n          PORT: 9009\n",
+    )
+    .unwrap();
+
+    let project = reg.load_project("deeptree").unwrap();
+
+    let env: Vec<(&str, &str)> = project
+        .effective_env("backend", "feat-login")
+        .into_iter()
+        .collect();
+    assert_eq!(env, [("PORT", "9009"), ("DEBUG", "true")]);
+}
+
+#[test]
+fn load_rejects_a_hand_written_invalid_env() {
+    let (dir, reg) = registry();
+    reg.init_project("deeptree", "develop").unwrap();
+    let path = dir.path().join("octotask-home/projects/deeptree.yaml");
+    for env in ["MY-PORT: 1", "PORT: \"{{ nope }}\""] {
+        fs::write(
+            &path,
+            format!("version: 1\nname: deeptree\nbase: develop\nrepos:\n  backend:\n    url: git@github.com:org/backend.git\n    env:\n      {env}\n"),
+        )
+        .unwrap();
+        assert!(
+            matches!(reg.load_project("deeptree"), Err(Error::InvalidEnv { .. })),
+            "{env}"
+        );
+    }
+}
+
+#[test]
+fn a_parse_error_never_shows_the_lines_of_the_file() {
+    let (dir, reg) = registry();
+    reg.init_project("deeptree", "develop").unwrap();
+    let path = dir.path().join("octotask-home/projects/deeptree.yaml");
+    fs::write(
+        &path,
+        "version: 1\nname: deeptree\nbase: develop\nrepos:\n  backend:\n    url: git@github.com:org/backend.git\n    env:\n      TOKEN: s3cr3t-token\n      PORT: ~\n",
+    )
+    .unwrap();
+
+    let error = reg.load_project("deeptree").unwrap_err();
+
+    assert!(matches!(error, Error::Parse { .. }), "{error:?}");
+    assert!(!error.to_string().contains("s3cr3t"), "{error}");
+}

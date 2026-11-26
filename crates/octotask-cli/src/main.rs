@@ -9,13 +9,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
-use clap::{Args, CommandFactory, Parser, Subcommand};
+use clap::{ArgGroup, Args, CommandFactory, Parser, Subcommand};
 use octotask_core::{
     Error, Gh, Home, Location, NewRepo, NewWorkspace, OriginBranches, Project, Registry,
-    RepoChanges, Result, Ssh, Stopper, check_remote_branch, checkout_workspace, create_workspace,
-    dev_changes, fetch_repos, locate_workspace, pull_workspace, register_repo, remove_project,
-    remove_workspace, resolve_location, review_workspace, save_dev_changes, set_project_location,
-    set_workspace_run, start_workspace, status, unregister_repo, update_repo, workspace_name,
+    RepoChanges, Result, Ssh, Stopper, WorkspaceRepoChanges, check_remote_branch,
+    checkout_workspace, create_workspace, dev_changes, fetch_repos, locate_workspace,
+    pull_workspace, register_repo, remove_project, remove_workspace, resolve_location,
+    review_workspace, save_dev_changes, set_project_location, start_workspace, status,
+    unregister_repo, update_repo, update_workspace_repo, workspace_name,
 };
 use serde_json::json;
 use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
@@ -249,6 +250,15 @@ fn repo_and_number(input: &str) -> std::result::Result<(String, u64), String> {
     Ok((repo.to_string(), number))
 }
 
+/// `<name>=<value>`, as `--env` takes it. The value is everything after the first `=`.
+fn name_and_value(input: &str) -> std::result::Result<(String, String), String> {
+    let (name, value) = input
+        .split_once('=')
+        .filter(|(name, _)| !name.is_empty())
+        .ok_or("expected `<name>=<value>`, e.g. `PORT=9008`")?;
+    Ok((name.to_string(), value.to_string()))
+}
+
 /// `<repo>=<branch>`, as `--branch` takes it.
 fn repo_and_branch(input: &str) -> std::result::Result<(String, String), String> {
     let (repo, branch) =
@@ -318,6 +328,11 @@ struct ProjectSetArgs {
 
 #[derive(Args)]
 #[group(required = true, multiple = true)]
+#[command(group(
+    ArgGroup::new("workspace_change")
+        .multiple(true)
+        .args(["run", "no_run", "env", "no_env"])
+))]
 struct RepoSetArgs {
     /// Short name accepted wherever the key is, e.g. `frontend`
     #[arg(long, conflicts_with = "no_alias")]
@@ -347,15 +362,22 @@ struct RepoSetArgs {
     #[arg(long)]
     no_setup: bool,
     /// Shell command that `octok up` runs in the checkout to start the repo
-    #[arg(long, group = "run_change")]
+    #[arg(long, conflicts_with = "no_run")]
     run: Option<String>,
     /// Remove the run command
-    #[arg(long, group = "run_change")]
+    #[arg(long)]
     no_run: bool,
-    /// Change the run command in the workspace of this branch only
+    /// Env value of the setup and run commands, e.g. `PORT=9008`: can be repeated. A value can
+    /// read others, e.g. `{{repos.backend.env.PORT}}`
+    #[arg(long, value_name = "NAME=VALUE", value_parser = name_and_value)]
+    env: Vec<(String, String)>,
+    /// Remove an env value: can be repeated
+    #[arg(long, value_name = "NAME")]
+    no_env: Vec<String>,
+    /// Change the run command and the env values in the workspace of this branch only
     #[arg(
         long,
-        requires = "run_change",
+        requires = "workspace_change",
         conflicts_with_all = [
             "alias", "no_alias", "base", "no_base", "url", "location", "no_location", "setup",
             "no_setup",
@@ -366,7 +388,12 @@ struct RepoSetArgs {
 
 impl RepoSetArgs {
     /// `location` is `--location` once resolved.
-    fn changes<'a>(&'a self, location: Option<&'a Location>) -> RepoChanges<'a> {
+    /// `env` is [`Self::env_changes`].
+    fn changes<'a>(
+        &'a self,
+        location: Option<&'a Location>,
+        env: &'a [(&'a str, Option<&'a str>)],
+    ) -> RepoChanges<'a> {
         RepoChanges {
             alias: optional_change(self.alias.as_deref(), self.no_alias),
             base: optional_change(self.base.as_deref(), self.no_base),
@@ -374,7 +401,18 @@ impl RepoSetArgs {
             location: optional_change(location, self.no_location),
             setup: optional_change(self.setup.as_deref(), self.no_setup),
             run: optional_change(self.run.as_deref(), self.no_run),
+            env,
         }
+    }
+
+    /// `--env` and `--no-env`, as the core takes them: `None` removes a value.
+    fn env_changes(&self) -> Vec<(&str, Option<&str>)> {
+        let set = self
+            .env
+            .iter()
+            .map(|(name, value)| (name.as_str(), Some(value.as_str())));
+        let removed = self.no_env.iter().map(|name| (name.as_str(), None));
+        set.chain(removed).collect()
     }
 }
 
@@ -629,8 +667,18 @@ fn repo(registry: &Registry, project_name: &str, cmd: RepoCommand, out: Output) 
         RepoCommand::Ls => print_repos(out, &registry.load_project(project_name)?),
         RepoCommand::Set { repo, changes } => {
             if let Some(branch) = &changes.branch {
-                let run = changes.run.as_deref();
-                let key = set_workspace_run(registry, project_name, &repo, branch, run)?;
+                let env = changes.env_changes();
+                let workspace_changes = WorkspaceRepoChanges {
+                    run: optional_change(changes.run.as_deref(), changes.no_run),
+                    env: &env,
+                };
+                let key = update_workspace_repo(
+                    registry,
+                    project_name,
+                    &repo,
+                    branch,
+                    &workspace_changes,
+                )?;
                 let workspace = workspace_name(branch);
                 let project = registry.load_project(project_name)?;
                 let document = RepoDocument::new(&project, Some(&workspace), &key);
@@ -644,7 +692,7 @@ fn repo(registry: &Registry, project_name: &str, cmd: RepoCommand, out: Output) 
                 registry,
                 project_name,
                 &repo,
-                &changes.changes(location.as_ref()),
+                &changes.changes(location.as_ref(), &changes.env_changes()),
                 confirm_missing_base(out),
             )?;
             let project = registry.load_project(project_name)?;

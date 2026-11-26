@@ -105,11 +105,13 @@ See [Reviewing a pull request](https://whiitex.github.io/octotask/guides/review-
 
 ```console
 $ octok repo set frontend --setup 'npm ci' --run 'npm run dev -- --port 3000'
-$ octok repo set backend --run 'PORT=9005 uv run main.py'
+$ octok repo set backend --run 'uv run main.py' --env PORT=9005
+$ octok repo set frontend --env 'VITE_API_URL=http://localhost:{{ repos.backend.env.PORT }}'
 $ octok up
 ```
 
 Every repository with a run command starts in its checkout, after its setup command the first time, the output is shown together with the name in front, and `Ctrl-C` stops them all.
+A value shared between repositories, such as the port of the backend, is written once and read by the others, and a workspace can override it to run beside another one.
 See [Running](https://whiitex.github.io/octotask/commands/up.html).
 
 ### Use with AI agents

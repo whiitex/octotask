@@ -78,7 +78,8 @@ pub(crate) fn lock_exclusive(path: &Path) -> Result<File> {
 fn parse<T: DeserializeOwned>(raw: &str, path: &Path) -> Result<T> {
     serde_saphyr::from_str(raw).map_err(|e| Error::Parse {
         path: path.to_path_buf(),
-        message: e.to_string(),
+        // The lines around the error would show env values, which can be secrets.
+        message: e.without_snippet().to_string(),
     })
 }
 
