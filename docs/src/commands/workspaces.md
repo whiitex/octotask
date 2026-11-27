@@ -2,12 +2,68 @@
 
 How `octok branch`, `octok checkout` and `octok rm` create, complete and delete a workspace: one folder with a checkout of every repository, all on the same branch.
 
-A [workspace](../concepts.md#workspace) is a folder with one checkout of each repository of the [project](../concepts.md#project), all on the same branch.
-Each checkout is a `git worktree` of the [cache](../concepts.md#cache) of its repository, so a workspace is created in an instant and several can be open side by side.
-`octok branch` creates the workspace of a new branch, `octok checkout` the one of a branch that already exists, and `octok rm` deletes a workspace.
-To build a workspace for pull requests, see [Pull request review](pr-review.md).
+## How to use it
 
-## Create the workspace of a new branch
+1. Start a new branch in every repository with `cd "$(octok branch <branch>)"`: `octok` prints the path, and the shell does the `cd`.
+2. Publish it with a plain `git push` in each checkout.
+3. Open a branch someone already pushed with `cd "$(octok checkout <branch>)"`.
+4. Delete the workspace with `octok rm <branch>`.
+
+For pull requests, see [Pull request review](pr-review.md).
+
+## Options
+
+| Command or option | What it does |
+|---|---|
+| `octok branch <branch>` | Creates the workspace of a new branch from the base of each repository. |
+| `octok checkout <branch>` | Prints the path of the workspace of a pushed branch, creating or completing it first. |
+| `octok checkout -b <branch>` | The same as `octok branch <branch>`. |
+| `--location <location>` | With `branch` or `checkout`: the whole workspace lives on that [machine](locations.md), whatever the repositories and the project say. |
+| `--allow-stale-dev` | With `branch` or `checkout`: creates the workspace even if a [dev change](dev.md) no longer applies, leaving that file as it is in git. |
+| `octok rm <branch> [--force]` | Deletes the workspace. `--force` deletes it even when work would be lost. |
+
+## Rules
+
+- **Layout:** each checkout is a `git worktree` of the cache, in `~/.octotask/workspaces/<project>/<workspace>/<repo>`, so a workspace is instant and several can be open at once.
+- **Name:** the branch with every `/` replaced by `-`, as [`octok status`](status.md) shows it: `feat/cart` lives in `feat-cart`.
+  Commands take the branch.
+  Two branches with the same name, such as `feat/cart` and `feat-cart`, cannot both have a workspace.
+- **Output:** the path goes to stdout, as `<host>:<path>` when the workspace has no folder here, and the rest to stderr.
+  On stderr, `created workspace` or `completed workspace` comes first, then the repositories under `branch from the remote`, `new branch from the base` or `branch restored from the cache`.
+  When every checkout is new from the base only the first line is printed, and nothing for a complete workspace.
+  A checkout on another machine adds a line with its path there.
+- **A new branch** starts at the tip of the base branch on the remote, fetched first: the base of the repository, or else of the project (see [Repositories](repo.md)).
+  It does not follow the base, and stays local until pushed.
+- **Publishing:** a plain `git push` sets the upstream, no `-u origin <branch>` needed, and `git pull` works as in any clone.
+  Until then `octok status` marks the branch `[not on the remote]`.
+- **`branch` refuses a pushed branch** on any remote of the project, so a new name never lands on someone else's work.
+- **`checkout`** gives each repository that has the branch on its remote a local branch at that commit, following it for `git pull`, `git push` and [`octok pull`](sync.md).
+  The others get a new branch from their base, so [`octok up`](up.md) can start everything, and `octok pull` follows it once pushed there.
+  A branch on no remote is refused: create it with `octok checkout -b <branch>`.
+- **One branch, one checkout:** git holds a branch in one checkout, so a branch checked out in another workspace, such as one of [`octok pr review`](pr-review.md), is refused with its folder.
+- **Completing:** a rerun adds only the missing checkouts: of a repository registered later, of an interrupted creation, or of a folder deleted by hand, which comes back with its commits.
+  `checkout` always completes; `branch` does unless a repository it adds has the branch on its remote.
+  On a complete workspace, `checkout` prints the path without a fetch, and `branch` is refused.
+- **Dev changes:** each new checkout gets the saved [dev changes](dev.md) of its repository.
+  If one no longer applies, the command names the file and creates nothing, unless `--allow-stale-dev`.
+- **All or nothing:** a failed checkout removes the checkouts and branches the command made.
+  A base missing on a remote, a project without repositories, or a branch name git refuses (checked before any fetch) creates nothing.
+- **`rm` refuses to lose work,** listing what only the workspace holds: uncommitted or untracked changes, commits on no branch of the remote at the last fetch or push (detached HEAD included), an unreadable checkout, or files that are not a checkout.
+  `--force` deletes it all anyway.
+- **`rm` does not check** files git ignores, such as `.env`, or the dev changes in the checkouts: it deletes them without a warning, and the next workspace gets the dev changes again.
+- **`rm` deletes** the folder, then the local branch of the workspace in each repository, the branch the checkout had if different, and the branches saved for a pull request review.
+  It forgets the location and run commands of the workspace in the project file, and cleans the caches of a workspace whose folder was deleted by hand.
+- **`rm` keeps** a branch checked out in another workspace, the branches of the remotes, the base branches, the cache and the repository.
+- **`--json`** prints the project, the workspace, its path and, per repository, its checkout path and outcome: see [JSON output](../agents/json-output.md).
+
+| Exit code | When |
+|---|---|
+| 2 | A branch name git does not accept. |
+| 3 | A base branch missing on a remote, a project without repositories, `checkout` of a branch on no remote, or `rm` of a branch without a workspace. |
+| 4 | `rm` found work that would be lost. |
+| 5 | `branch` of a pushed branch or an existing workspace, a name taken by another branch, a branch checked out elsewhere, or a dev change that no longer applies. |
+
+## Example: create the workspace of a new branch
 
 ```console
 $ octok project init shop
@@ -29,33 +85,7 @@ $ git log --oneline -1
 de08597 Fix order totals
 ```
 
-`octok branch <branch>` fetches every repository, creates the branch in each one from its up-to-date base branch, and checks it out in a new folder `~/.octotask/workspaces/<project>/<workspace>/<repo>`.
-It prints the path of the workspace on stdout, and what it did on stderr, so `cd "$(octok branch feat/cart)"` enters the workspace.
-A program cannot change the folder of the shell that started it: that is why the command prints the path and the shell does the `cd`.
-With `--location`, or when a repository lives on another machine, stderr also has one line per repository there, with the path of its checkout on that machine.
-The path on stdout is the folder of the workspace on this machine, and `<host>:<path>` when the workspace has no folder here.
-`octok checkout -b <branch>` does the same as `octok branch <branch>`.
-
-### What each repository starts from
-
-- The new branch starts at the tip of the base branch of the repository as the remote has it now, not at an old local copy: the command fetches first.
-  The base branch is the one of the repository, or else the one of the project: see [Repositories](repo.md#the-base-branch).
-- The branch does not follow the base branch.
-  It exists only on your machine until you publish it.
-- A repository whose remote has no base branch makes the whole command fail with exit code 3, and nothing is created.
-- A project without repositories is refused with exit code 3: add one with [`octok repo add`](repo.md).
-- Every new checkout gets the [dev changes](dev.md) saved for its repository.
-  The command creates nothing, names the file and exits with code 5 when a dev change no longer applies to the commit a checkout starts from: `--allow-stale-dev` creates the workspace with that file as it is in git.
-- If creating one checkout fails, the checkouts and the branches that the command created are removed again.
-- A branch name that git does not accept is refused with exit code 2, before anything is fetched.
-
-### The name of a workspace
-
-A workspace is named after its branch, with every `/` replaced by `-`: the branch `feat/cart` lives in the workspace `feat-cart`, and it is the name shown by [`octok status`](status.md).
-Other commands take the branch, such as `octok rm feat/cart`, and the name is derived from it.
-
-Two branches can give the same name: `feat/cart` and `feat-cart`.
-Only one of them can have a workspace, and the second is refused, with exit code 5, whether it comes from `octok branch` or from `octok checkout`:
+`feat-cart` belongs to `feat/cart`, and a rerun of `branch` is refused:
 
 ```console
 $ octok branch feat-cart
@@ -65,14 +95,7 @@ $ octok branch feat/cart
 error: workspace `feat-cart` already exists at /Users/you/.octotask/workspaces/shop/feat-cart
 ```
 
-The second command shows what a rerun of `octok branch` does on a workspace that is already complete: it is refused, and nothing changes.
-
-### Publishing the branch
-
-The new branch exists only in your checkouts.
-A plain `git push` inside a checkout publishes it and sets its upstream, with no need for `-u origin <branch>`.
-The cache is configured for that, so `git pull` and `git push` work in every checkout as in any clone.
-Until a branch is pushed, [`octok status`](status.md) marks it `[not on the remote]`.
+## Example: publish the branch
 
 ```console
 $ cd "$HOME/.octotask/workspaces/shop/feat-cart/shop-backend"
@@ -87,11 +110,9 @@ $ git status --short --branch
 ## feat/cart...origin/feat/cart
 ```
 
-## Branches that already exist
+## Example: open a branch that already exists
 
-`octok branch` is for new branches only.
-It refuses a branch that is already on the remote of some repository, so that a new name never lands on somebody else's work by mistake.
-`octok checkout <branch>` is the command for a branch that someone already pushed, such as the pull request of a teammate or of an agent:
+`feat/login` is on the remotes of the frontend and the backend only:
 
 ```console
 $ octok branch feat/login
@@ -110,35 +131,14 @@ $ git status --short --branch
 ## feat/login...origin/feat/login
 ```
 
-`octok checkout <branch>` prints the path of the workspace of the branch, creating it first when it is not there:
-
-- A repository that has the branch on its remote gets a local branch at the same commit, which follows the remote one: `git pull`, `git push` and [`octok pull`](sync.md) work on it.
-- A repository that does not have the branch gets a new branch with that name from its up-to-date base, as with `octok branch`, so the workspace is complete and [`octok up`](up.md) can start everything.
-  The branch stays on your machine until you push it.
-  If it is pushed to that repository later, `octok pull` makes the local branch follow it.
-- A workspace that is already complete is left alone: the command only prints its path, without a fetch.
-- git keeps a branch in one checkout at a time, so a branch that another workspace has checked out, such as one made by [`octok pr review`](pr-review.md#one-branch-one-workspace), is refused with exit code 5 and the folder that holds it.
-- A branch that is on no remote of the project is refused with exit code 3.
-  The error says to create it with `octok checkout -b <branch>`, which is the same as `octok branch <branch>`:
-
 ```console
 $ octok checkout feat/nothing
 error: no repo has a branch `feat/nothing` on its remote: create it with `octok checkout -b feat/nothing`
 ```
 
-`octok branch` and `octok checkout` print the same messages on stderr: a `created workspace` or `completed workspace` line, then the repositories by what they got.
-The lines are `branch from the remote` for a branch that the remote had, `new branch from the base` for a new branch and `branch restored from the cache` for a branch whose checkout was lost.
-When every checkout is new and made from the base, only the first line is printed.
-Nothing is printed when the workspace was complete.
+## Example: complete a workspace
 
-## Complete a workspace
-
-Run the command again on a workspace that lacks some checkouts, and it adds only those.
-This happens in three cases:
-
-- A repository was registered after the workspace was created.
-- The creation was interrupted.
-- The folder of a checkout was deleted by hand: the checkout is restored with its commits, because the branch is still in the cache.
+`shop-agent` was added after `feat-cart`, and the second `checkout` only prints the path:
 
 ```console
 $ cd "$(octok checkout feat/cart)"
@@ -151,17 +151,7 @@ shop-frontend
 $ cd "$(octok checkout feat/cart)"
 ```
 
-The second `octok checkout` prints the path and nothing else, because the workspace is complete.
-Here `shop-agent` was registered after `feat-cart` was created, as in the example of the previous section.
-The other checkouts are not touched.
-`octok checkout <branch>` always completes.
-`octok branch <branch>` completes too, as long as none of the repositories it adds has the branch on its remote.
-A complete workspace is refused by `octok branch` as shown above, and printed by `octok checkout`.
-
-## Delete a workspace
-
-`octok rm <branch>` deletes the workspace of a branch: its checkouts, its folder and its local branches.
-It refuses when that would lose work that exists nowhere else, and lists what it found:
+## Example: delete a workspace
 
 ```console
 $ cd "$(octok branch feat/search)/shop-backend"
@@ -182,48 +172,12 @@ $ octok rm feat/search --force
 removed workspace `feat-search` from shop
 ```
 
-Without `--force`, the command checks every repository and refuses, with exit code 4, when it finds:
-
-- uncommitted changes in a checkout, including files that git does not track;
-- commits on the branch that are on no branch of the remote, as of the last fetch or push;
-- commits on a detached HEAD that are on no branch of the remote;
-- a checkout that cannot be read;
-- files or folders in the workspace that are not the checkout of a repository.
-
-Nothing is deleted when anything is found.
-`--force` deletes the workspace anyway and discards that work.
-Files that git ignores, such as `.env`, are not checked: `octok rm` deletes them without a warning, with or without `--force`.
-So are the saved [dev changes](dev.md) in the checkouts: they are saved elsewhere, so the next workspace gets them again.
-
-`octok rm` deletes the folder, then the local branches:
-
-- It deletes the local branch of the workspace in each repository.
-  It also deletes the branch that the checkout had, when that differs, and the branches saved for a [pull request review](pr-review.md).
-- It never deletes a branch that another workspace has checked out.
-- It never deletes the branch of a remote: the branches on GitHub stay.
-- It never deletes the base branch of a repository, the cache or the repository itself.
-- It forgets the settings that the workspace had of its own in the project file: its location and its run commands.
-  See [Locations and SSH](locations.md) and [Running](up.md).
-
-A workspace whose folder was deleted by hand can be removed as well: `octok rm` cleans what it left in the caches.
-A branch without a workspace is refused with exit code 3.
-
 ```console
 $ octok rm feat/search
 error: no workspace for `feat/search`: create it with `octok checkout <branch>`, or with `octok checkout -b <branch>` for a new branch
 ```
 
-## Options
-
-Both `octok branch` and `octok checkout` take these:
-
-- `--location <location>`: the whole workspace lives on that machine, whatever the repositories and the project say.
-  See [Locations and SSH](locations.md).
-- `--allow-stale-dev`: create the workspace even if some dev changes no longer apply.
-  See [Dev changes](dev.md).
-
-With `--json`, a command prints one document with the project, the workspace, its path and, for each repository, the path of its checkout and its outcome.
-See [JSON output](../agents/json-output.md).
+## Example: JSON output
 
 ```console
 $ octok branch feat/json --json

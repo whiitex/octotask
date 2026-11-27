@@ -2,12 +2,7 @@
 
 The words `octok` uses (project, repository, base branch, cache, workspace, location, dev changes), how they relate and where each one lives on disk.
 
-`octok` runs the same git operation on every repository of a project.
-To do that it keeps a few things apart: the list of repositories, one clone of each, and one set of checkouts for each feature.
-The sections below define each of them.
-The other pages link here for the definitions.
-
-This is how they fit together on disk, for a project `shop` with two repositories and one workspace:
+For a project `shop` with two repositories and one workspace, the data folder looks like this:
 
 ```text
 ~/.octotask/
@@ -20,60 +15,45 @@ This is how they fit together on disk, for a project `shop` with two repositorie
   dev/shop/shop-backend/               the dev changes saved for a repository
 ```
 
-The cache is shared by every workspace.
-A checkout is a git worktree of the cache, so creating a workspace never clones a repository again.
+Every workspace shares the cache, so creating one never clones a repository again.
 
 ## Project
 
 A project is a named group of repositories that make up one product, such as a frontend, a backend and an agent.
-It is stored in one file, `~/.octotask/projects/<project>.yaml`, and holds:
+Its file `~/.octotask/projects/<project>.yaml` holds the repositories, the default [base branch](#base-branch) and [location](#location), and the settings of its workspaces.
 
-- the repositories, each with its settings;
-- the default [base branch](#base-branch) of the repositories;
-- optionally, the default [location](#location) of the repositories;
-- the settings of the workspaces that have any.
+- **Create it** with `octok project init <name>`.
+- **The default project** is the one commands act on without `-p <project>`, as in `octok -p shop status`, and `octok project use <name>` changes it.
+- **A name** is up to 64 letters, digits, `.`, `_` and `-`, starting with a letter or a digit.
+- **Several projects** can share a repository, each with its own cache, workspaces and file.
 
-You create it with `octok project init <name>`.
-One project is the default: commands act on it unless you pass `-p <project>`, for example `octok -p shop status`.
-`octok project use <name>` changes the default.
-Several projects can share the same repository: each one has its own cache, its own workspaces and its own file.
-
-A project name is a name for a file: up to 64 letters, digits, `.`, `_` and `-`, starting with a letter or a digit.
-See [Projects](commands/project.md) for the commands and [Configuration files](reference/configuration.md) for the file.
+See [Projects](commands/project.md) and [Configuration files](reference/configuration.md).
 
 ## Repository
 
-A repository is a git repository registered in a project.
-It has:
+A repository is a git repository registered in a project, with:
 
-- a **URL**, which `octok` clones and fetches from.
-  It can be the scp-like form `git@github.com:acme/shop-backend.git`, an `https://`, `http://`, `ssh://`, `git://` or `file://` URL, or an absolute path, with no spaces.
-- a **key**, its identity in the project and the name of its folder in every workspace.
-  It defaults to the last part of the URL without `.git`: `git@github.com:acme/shop-backend.git` gives `shop-backend`.
-  `octok repo add --name <key>` chooses another one, which is needed when two repositories have the same name.
-- an optional **alias**, a shorter name accepted wherever a key is: `octok repo set backend --base main` works the same as `octok repo set shop-backend --base main`.
+- **a URL**: the scp-like `git@github.com:acme/shop-backend.git`, an `https://`, `http://`, `ssh://`, `git://` or `file://` URL, or an absolute path, with no spaces.
+- **a key**, its identity in the project and the name of its folder in every workspace.
+  It defaults to the last part of the URL without `.git`, and it never changes.
+  `octok repo add --name <key>` chooses another one, as needed when two repositories have the same name.
+- **an optional alias**, a shorter name accepted wherever a key is, as in `octok repo set backend --base main`.
   Keys and aliases share one namespace, so a name always points to one repository.
-- optionally its own base branch, its own location, and the commands `octok up` runs to set it up and start it.
+- **optionally**, its own base branch and location, and the commands `octok up` runs.
 
-Keys and aliases follow the same rules as project names.
-The key never changes once the repository is registered, because it names folders.
-Commands print a repository as `key (alias)`, or only `key` when there is no alias.
+Keys and aliases follow the rules of project names, and commands print a repository as `key (alias)`.
 See [Repositories](commands/repo.md).
 
 ## Base branch
 
 The base branch is the branch a new feature starts from, usually `staging`, `develop` or `main`.
-It is set at two levels:
 
-- **The project** has a base branch, `staging` unless `octok project init --base` says otherwise.
-- **A repository** can override it with its own, for the repository whose long-lived branch has another name.
+- **The project** has one, `staging` unless `octok project init --base` says otherwise.
+- **A repository** can have its own; without one it follows the project, also when the project base changes later.
+- **`octok branch <branch>`** fetches every repository and creates the branch from the base of each one as it is on its remote, so two repositories can start from different branches.
+- **A base branch not on the remote** needs a confirmation, and is refused when `octok` cannot ask.
 
-A repository without its own base follows the project, including when the project base changes later.
-`octok branch <branch>` fetches every repository and creates the new branch from the base branch of each one, as it is on its remote.
-Two repositories of a workspace can therefore start from different branches.
-`octok status` shows the base branch of each repository and its last commit.
-
-When a base branch is not on the remote, `octok` asks for confirmation before using it, and refuses when it cannot ask.
+Here the frontend follows the project and the backend has its own base:
 
 ```console
 $ octok project init shop --base staging
@@ -88,61 +68,48 @@ shop-frontend (frontend)  staging  git@github.com:acme/shop-frontend.git
 shop-backend (backend)    main     git@github.com:acme/shop-backend.git
 ```
 
-Here the frontend follows the project and the backend has its own base.
-
 ## Cache
 
-The cache of a repository is a bare clone of it, kept at `~/.octotask/cache/<project>/<key>.git`.
-It is made once, when the repository is added, and updated by `octok fetch`, `octok pull` and every command that creates a workspace.
-All the workspaces of the project are made from it, which is why creating one is fast and does not download the repository again.
+The cache of a repository is a bare clone at `~/.octotask/cache/<project>/<key>.git`, made when the repository is added.
 
-A cache is for `octok` only: do not work in it.
-It holds the objects and the branches of the remote, plus the local branches of the workspaces.
-It is deleted with its repository (`octok repo rm`) and with its project (`octok project rm`).
-`octok fetch` clones again a cache that is missing.
+- **It is updated** by `octok fetch`, `octok pull` and every command that creates a workspace.
+- **It is for `octok` only:** do not work in it.
+- **It is deleted** with its repository (`octok repo rm`) or its project (`octok project rm`), and `octok fetch` clones a missing one again.
 
 ## Workspace
 
-A workspace is the folder that holds the work on one feature: one checkout of every repository of the project, all on the same branch.
+A workspace is the folder of one feature: a checkout of every repository, all on the same branch.
 
-- **Its name comes from the branch**, with `/` replaced by `-`: the branch `feat/login` lives in the workspace `feat-login`.
+- **Its name** is the branch with `/` replaced by `-`: `feat/login` lives in `feat-login`.
   `feat/login` and `feat-login` give the same name, so only one of them can have a workspace.
-- **A checkout** is the working tree of one repository inside the workspace: a git worktree of its cache, in the folder named after the key of the repository.
-  It is a normal working tree: `git status`, `git commit` and `git push` work in it.
-  A branch can be checked out in one place at a time, which is why every workspace has its own branches.
-- **Its path** is `~/.octotask/workspaces/<project>/<workspace>`.
-  `octok branch`, `octok checkout` and `octok pr review` print it, so that `cd "$(octok branch feat/login)"` enters it.
+- **A checkout** is a git worktree of the cache, in the folder named after the key, where `git` works as usual.
+  A branch can be checked out in one place at a time, so every workspace has its own branches.
+- **Its path** is `~/.octotask/workspaces/<project>/<workspace>`, printed by the commands that create it, so `cd "$(octok branch feat/login)"` enters it.
+- **Create it** with `octok branch` (a new branch), `octok checkout` (a pushed branch) or `octok pr review` (pull requests and branches), and delete it with `octok rm`.
 
-You create a workspace with `octok branch` (a new branch), `octok checkout` (a branch someone already pushed) or `octok pr review` (a choice of pull requests and branches), and delete it with `octok rm`.
-Workspaces are isolated: several features can be open side by side without stashing or switching branches.
 See [Workspaces](commands/workspaces.md) and [Pull request review](commands/pr-review.md).
 
 ## Location
 
-A location is the machine where a repository's cache and checkouts live.
-By default it is this machine, under `~/.octotask`, written `local`.
-A repository can live on another machine instead, such as a VM where the backend runs.
-`octok` still runs only on your machine: for a repository on another machine it runs `git` there over `ssh`.
+A location is the machine where a repository's cache and checkouts live: `local`, this machine, by default.
+For another machine, such as a VM, `octok` runs `git` there over `ssh`.
 
-A location is `local`, `<host>`, or `<host>:<path>`.
-`<host>` is anything `ssh` accepts, such as a `Host` of `~/.ssh/config` or `user@host`.
-With only the host, the folder is `.octotask` in the home of the user there, and a relative `<path>` is under that home.
-It is set at three levels, and the first one set wins:
+- **Its form** is `local`, `<host>` or `<host>:<path>`, where `<host>` is anything `ssh` accepts, such as a `Host` of `~/.ssh/config` or `user@host`.
+  With only the host the folder is `.octotask` in the home of the user there, and a relative `<path>` is under that home.
+- **The first level set wins:**
+  1. the workspace, with `octok branch <branch> --location <location>`, for every repository of it;
+  2. the repository, with `--location` on `octok repo add` or `octok repo set`;
+  3. the project, with `--location` on `octok project init` or `octok project set`.
+- **A workspace can span machines:** one folder on each, and `octok status`, `octok pull` and `octok rm` reach all of them.
 
-1. the workspace, with `octok branch <branch> --location <location>`: every repository of that workspace lives there;
-2. the repository, with `--location` on `octok repo add` or `octok repo set`;
-3. the project, with `--location` on `octok project init` or `octok project set`.
-
-When none is set, the repository lives on this machine.
-A workspace can then have one folder on this machine and one on each other machine, and `octok status`, `octok pull` and `octok rm` reach all of them.
-See [Locations and SSH](commands/locations.md) and the guide [Repositories on another machine](guides/remote-machine.md).
+See [Locations and SSH](commands/locations.md) and [Repositories on another machine](guides/remote-machine.md).
 
 ## Dev changes
 
-Dev changes are the local-only edits a repository needs to run on your machine and that must never be committed: a port, a database name, a line turned off, a `.env` file.
-You save them once from a checkout with `octok dev save`, and `octok` puts them into every checkout it creates afterwards.
-git does not show them in `git status` or `git diff`, and no commit contains them.
-They are kept per repository, in `~/.octotask/dev/<project>/<key>` on the machine where the repository lives.
+Dev changes are the local-only edits a repository needs to run on your machine, such as a port, a disabled line or a `.env` file.
+You save them once with `octok dev save`, and `octok` puts them into every new checkout.
+They do not show in `git status` or `git diff`, and no commit contains them.
+They are kept in `~/.octotask/dev/<project>/<key>` on the machine where the repository lives.
 See [Dev changes](commands/dev.md).
 
 ## Related

@@ -1,30 +1,58 @@
 # Running
 
-How `octok up` starts the repositories of a workspace together, shows their output side by side and stops them all at once.
+How `octok up` starts the repositories of a workspace together, shows their output in one stream and stops them all with `Ctrl-C`.
 
-## What it is for
+## How to use it
 
-A repository can say how it is started, with two shell commands: the **run command** starts it, such as `npm run dev`, and the **setup command** prepares a checkout before its first run, such as `npm ci`.
-`octok up` runs them for every repository of a [workspace](../concepts.md#workspace), shows what they print in one stream with the name of the repository in front, and stays attached until they have all ended.
-`Ctrl-C` stops every repository and every process they started.
+1. Give each repository a **run command**, and a **setup command** if a checkout needs one before its first run: `octok repo set <repo> --run 'npm run dev' --setup 'npm ci'`.
+2. Write the values the repositories share, such as a port, once as **env values**: `octok repo set backend --env PORT=9005`.
+   Another repository reads them with a template: `--env 'API_URL=http://localhost:{{ repos.backend.env.PORT }}'`.
+3. Give one workspace its own command or value with `--branch <branch>`, for example a different port.
+4. Start the workspace with `octok up`, from any folder inside it, or with `octok up --branch <branch>` from anywhere.
+5. Stop everything with `Ctrl-C`, on every machine.
 
-## Setting the commands
-
-The commands belong to a [repository](../concepts.md#repository) of the project, and are set with [`octok repo set`](repo.md):
+## Options
 
 | Command | What it does |
 |---|---|
-| `octok repo set <repo> --run <command>` | Sets the run command of a repository. `--no-run` removes it. |
-| `octok repo set <repo> --setup <command>` | Sets the setup command of a repository. `--no-setup` removes it. |
-| `octok repo set <repo> --run <command> --branch <branch>` | Sets the run command for the workspace of one branch only. `--no-run --branch <branch>` goes back to the command of the repository. |
-| `octok repo set <repo> --env <name>=<value>` | Sets an env value of the commands of a repository, see [shared values](#shared-values). `--no-env <name>` removes it. With `--branch <branch>`, for the workspace of that branch only. |
+| `octok repo set <repo> --run <command>` | Sets the run command. `--no-run` removes it. |
+| `octok repo set <repo> --setup <command>` | Sets the setup command. `--no-setup` removes it. |
+| `octok repo set <repo> --env <name>=<value>` | Sets an env value. `--no-env <name>` removes it. |
+| `... --branch <branch>` | Applies `--run`, `--no-run`, `--env` or `--no-env` to the workspace of that branch only, even before it exists. |
+| `octok up [<repo>...] [-b <branch>]` | Starts the named repositories, or every one with a run command. |
 
-`--run`, `--setup` and `--env` can be given together, and with the other options of `repo set`, except `--branch`: a workspace has its own run command and env values only.
-Both commands are plain text for `sh`, so they can hold variables, `&&`, pipes and quotes.
-They are saved in the project file, as `run` and `setup` of the repository, and `run` under `workspaces` for a workspace: see [configuration files](../reference/configuration.md).
-They are left out of every JSON document of `octok`, which does not even say whether a repository has one; only `octok up` shows them, in the lines it prints before running each one.
-Env values are never shown at all.
-With `--branch`, the workspace does not have to exist yet: the command is used once a workspace of that branch is created.
+## Rules
+
+- **Commands** are plain `sh` text, saved in the [project file](../reference/configuration.md).
+  They run in the checkout of the repository, on the machine where it lives, with an empty stdin and the env values in the environment.
+  `octok` prints a command only in the `$` line before running it, and never prints env values.
+- **Env values:** a name is letters, digits and `_`, not starting with a digit; a value is any text on one line.
+  Templates work only in env values; in commands, read the variable as the shell does, as in `$PORT`.
+- **Templates:** `{{ repos.<repo>.env.<name> }}`, `{{ project.name }}`, `{{ workspace.name }}` and `{{ workspace.slug }}`, the name in lowercase with every other character replaced by `-` (`feat/Cart.v2` gives `feat-cart-v2`).
+  An unknown variable is refused by `octok repo set`, and a value not defined in the workspace or read in a loop by `octok up`.
+- **Nothing starts unless all can:** a named repository without a run command, a missing checkout or an undefined value stops `octok up` before anything starts.
+- **Setup** runs before the run command until it succeeds once in a checkout, and again when its text changes.
+  A failed setup skips that repository only.
+- **Output:** each line has the repository in front, on stdout.
+  `octok`'s own lines, such as `stopping...` and how each repository ended, go to stderr.
+  `--json` prints one event per line: see [JSON output](../agents/json-output.md#octok-up).
+- **Ending:** a command that ends does not stop the others, and `octok up` returns when all have ended.
+  `Ctrl-C`, `SIGTERM` or `SIGHUP` send `SIGTERM` to every command and what it started, then `SIGKILL` after 10 seconds.
+  No process is left behind, also on [another machine](locations.md), where a command stops by itself 30 seconds after losing `octok`.
+- **Ports:** `octok` does not choose or forward ports.
+  Two workspaces running the same repository at once need different values, set with `--branch`.
+
+| Exit code | When |
+|---|---|
+| 0 | Every repository ended with status 0. |
+| 1 | A repository ended with another status, or a setup failed. |
+| 2 | Not inside a workspace and no `--branch`. |
+| 3 | Refused before the start: unknown repository or workspace, no run command, undefined value. |
+| 130 | Stopped with `Ctrl-C`, `SIGTERM` or `SIGHUP`. |
+
+## Example: set the commands
+
+The backend runs on port 9005, and on 9006 in the workspace `feat-cart`:
 
 ```console
 $ octok project init shop
@@ -55,31 +83,9 @@ workspaces:
           PORT: "9006"
 ```
 
-The backend reads its port from `$PORT`: the workspace `feat-cart` runs it on port 9006, and every other workspace on 9005.
-The override lasts until [`octok rm feat/cart`](workspaces.md) removes the workspace, or until `octok repo set backend --no-env PORT --branch feat/cart`.
+## Example: share a value
 
-## Shared values
-
-The values the repositories of a project share, such as the port of the backend that the frontend calls, are written once, as **env values** of the repository they belong to.
-`octok up` passes the env values of a repository to its setup and run commands as environment variables.
-
-- **Names** start with a letter or `_`, and contain only letters, digits and `_`, as in `PORT` or `VITE_API_URL`.
-  A **value** is any text without a newline.
-  `--env` takes everything after the first `=`, so `--env URL=http://x/?a=b` keeps the second `=`, and `--env DEBUG=` sets an empty value.
-- **Per workspace.** With `--branch`, a value is set for the workspace of that branch only: it replaces the value of the repository with the same name, or adds a new name.
-- **Templates.** A value can read other values with `{{ <variable> }}`:
-
-  | Variable | Value |
-  |---|---|
-  | `{{ repos.<repo>.env.<name> }}` | The env value `<name>` of the repository `<repo>`, a key or an alias, in the same workspace. |
-  | `{{ project.name }}` | The name of the project. |
-  | `{{ workspace.name }}` | The name of the workspace, as in `feat-cart`. |
-  | `{{ workspace.slug }}` | The name of the workspace in lowercase, with every character but letters, digits, `_` and `-` replaced by `-`: `feat/Cart.v2` gives `feat-cart-v2`. Use it where a name must be lowercase, as for [Docker Compose](../guides/compose-per-workspace.md). |
-
-  Templates work only in env values. In the setup and run commands, read the variables as the shell does, as in `$PORT`.
-  A value read through a template can use templates too, but values that read each other in a loop are refused.
-- **Checked twice.** `octok repo set` refuses a name it cannot use and a variable it does not know, such as `{{ repo.backend.env.PORT }}`.
-  `octok up` refuses a variable that is not defined in the workspace it starts, with exit code 3, before anything is started: a value is never replaced by an empty text.
+The frontend reads the port of the backend, so it gets `http://localhost:9006` in `feat-cart` and `http://localhost:9005` elsewhere:
 
 ```console
 $ octok repo set frontend --env 'VITE_API_URL=http://localhost:{{ repos.backend.env.PORT }}'
@@ -94,27 +100,33 @@ $ octok repo set frontend --env 'API={{ repo.backend.env.PORT }}'
 error: invalid env `API` of repo `shop-frontend`: uses an unknown variable
 ```
 
-In the workspace `feat-cart`, the frontend gets `VITE_API_URL=http://localhost:9006`, and in every other workspace `http://localhost:9005`.
+## Example: a run
 
-## Starting a workspace
+`Ctrl-C` stops both repositories:
 
 ```text
-octok up [<repo>...] [--branch <branch>]
+$ octok up --branch feat/cart
+frontend | $ npm ci
+backend  | $ uv run main.py
+backend  | Uvicorn running on http://0.0.0.0:9006
+frontend | added 312 packages in 9s
+frontend | $ npm run dev -- --port 3000
+frontend | Local: http://localhost:3000/
+^Cstopping...
+backend  | stopped
+frontend | stopped
+$ echo $?
+130
 ```
 
-- **Which workspace.**
-  With `--branch` (or `-b`), the workspace of that branch.
-  Without it, the workspace that contains the current folder, so you can run `octok up` from any folder inside it, and the project of that workspace, whatever `-p` says.
-  Anywhere else it is refused, with exit code 2, and tells you to pass `--branch`.
-- **Which repositories.**
-  Without `<repo>`, every repository of the workspace that has a run command, the one of the workspace when it has one.
-  With `<repo>` (a key or an alias, as many as you like), only those, and each must have a run command.
-- **Nothing starts unless all can.**
-  A named repository with no run command, a repository to start whose checkout is missing, an env value that reads one that is not defined, or a workspace where no repository has a run command, is refused with exit code 3 before anything is started.
-- **Where a command runs.**
-  In the checkout of its repository in that workspace, with `sh`, on the machine where the checkout lives, with the env values of its repository in that workspace added to the environment.
-  A repository without a run command is not started.
-  Commands read an empty stdin.
+A repository that ends by itself or fails its setup, and one still running 10 seconds after the stop, are reported like this:
+
+```text
+backend  | ended (exit status: 1)
+backend  | killed: it was still running 10 seconds after the stop
+```
+
+## Example: what is refused
 
 ```console
 $ cd "$OCTOTASK_HOME/workspaces/shop/feat-cart"
@@ -137,102 +149,9 @@ $ octok up
 error: not inside a workspace: pass its branch, as in `octok up --branch <branch>`
 ```
 
-## A run
-
-This is a run by hand, with the commands set as above.
-It cannot be checked by the documentation tests, because it needs a terminal and ends only when you stop it.
-The text between `^C` and the end is what `octok` prints after `Ctrl-C`.
-
-```text
-$ octok up --branch feat/cart
-frontend | $ npm ci
-backend  | $ uv run main.py
-backend  | Uvicorn running on http://0.0.0.0:9006
-frontend | added 312 packages in 9s
-frontend | $ npm run dev -- --port 3000
-frontend | Local: http://localhost:3000/
-^Cstopping...
-backend  | stopped
-frontend | stopped
-$ echo $?
-130
-```
-
-### Output
-
-- Every line a repository prints, on stdout or stderr, goes to the stdout of `octok` with the alias or the key of the repository in front, padded so that the lines line up.
-- A line that starts with `$` is a command that `octok` runs, the setup or the run command, so you can tell which one is running.
-- What `octok` itself says goes to stderr: `stopping...` and the line that says how each repository ended.
-  Redirect stdout to keep only what the repositories print.
-- With `--json`, `octok up` prints one document per event instead: see [JSON output](../agents/json-output.md#octok-up).
-
-### Setup
-
-The setup command runs before the run command, in the same checkout.
-
-- It runs until it succeeds once in that checkout, and again when its text changes.
-  The text of the last setup that succeeded is kept in the git directory of the checkout, so a new workspace runs it once and the next `octok up` does not.
-- When it fails, the repository is not started, and its line says how the setup ended.
-  The other repositories go on.
-- A repository without a setup command goes straight to its run command.
-
-```text
-backend  | $ pip install -r requirements.txt
-backend  | ERROR: Could not find a version that satisfies the requirement nothing
-backend  | ended (exit status: 1)
-```
-
-## How it ends
-
-### A command that ends by itself
-
-It does not stop the others.
-`octok up` ends when every repository has ended.
-Each ending is reported on stderr:
-
-```text
-backend  | ended (exit status: 3)
-```
-
-The exit code of `octok up` is 0 when every repository ended well, and 1 when any of them failed, whatever the code it failed with.
-When a command ends, the processes it started are stopped too, so nothing it launched outlives it.
-
-### Ctrl-C and signals
-
-`Ctrl-C` stops every repository, prints `stopping...` once, and `octok up` then exits with code 130.
-For each repository, the command and every process it started receive `SIGTERM`, and `SIGKILL` if they are still running 10 seconds later.
-A repository that needed the `SIGKILL` is reported as `killed: it was still running 10 seconds after the stop`; the others as `stopped`.
-
-The same stop happens by itself when `octok` receives `SIGTERM` or `SIGHUP`, as when its terminal is closed, and when `octok` is killed with `SIGKILL`: the supervision of each command notices that `octok` is gone.
-No process is left behind.
-
-| Exit code | When |
-|---|---|
-| 0 | Every repository ended with status 0. |
-| 1 | At least one repository ended with another status, or a setup failed. |
-| 130 | You stopped it, or `octok` got `SIGTERM` or `SIGHUP`. |
-
-The refusals before the start have their own codes, as for any command: 2 for a usage error, 3 for something not found. They are listed in [JSON output](../agents/json-output.md).
-
-## Repositories on another machine
-
-A repository whose checkout is on [another machine](locations.md) is started there, over `ssh`, with the same setup, the same output and the same stop.
-Two more things apply:
-
-- `octok` sends a heartbeat to the machine every 2 seconds.
-  A command that has not heard from `octok` for 30 seconds stops by itself, which is what a lost connection looks like from the other machine: nothing is left running there.
-- On its side, `ssh` gives up on a machine that has not answered for 15 seconds, so `octok` does not wait for ever on a connection that died without closing.
-
-## Fixed ports
-
-`octok` does not choose ports, forward them or check them: a port is an env value or part of the command.
-Two workspaces that run the same repository at the same time need different ports, so give one of them its own value with `--env <name>=<value> --branch <branch>`, as above.
-A repository on another machine listens on that machine, so use its address there.
-For the services of a `compose.yaml`, see [A Docker Compose per workspace](../guides/compose-per-workspace.md).
-
 ## Related pages
 
 - [Repositories](repo.md), for `octok repo set`.
 - [Workspaces](workspaces.md), for the workspace a command runs in.
-- [JSON output](../agents/json-output.md#octok-up), for the events of `--json`.
+- [A Docker Compose per workspace](../guides/compose-per-workspace.md), for ports of services.
 - [Troubleshooting](../troubleshooting.md).

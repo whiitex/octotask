@@ -2,11 +2,49 @@
 
 What `octok status` prints for a project: its repositories, its workspaces, the checkout of each repository in each workspace, and the problems it finds.
 
-`octok status` shows where everything stands in the default project, or in the one named with `-p`.
-It answers three questions: what each repository's base branch looks like, what each workspace has checked out, and what is wrong.
-It reads the project file, the caches and the checkouts on disk, and it never contacts a git remote.
+## How to use it
 
-## The usual output
+1. Refresh what the remotes have with `octok fetch` or [`octok pull`](sync.md), since `octok status` never contacts a git remote.
+2. Run `octok status` for the default project, or `octok status -p <project>` for another one.
+3. Fix what it reports, with the hint on each line.
+
+## Options
+
+| Command | What it does |
+|---|---|
+| `octok status` | Prints the project, its repositories, its workspaces and the orphan caches. |
+| `octok status -p <project>` | Does the same for the named project. |
+| `octok status --json` | Prints one document with the same information and more detail: see [JSON output](../agents/json-output.md). |
+
+## Rules
+
+- **Read only:** `octok status` reads the project file, the clones and the checkouts, and changes nothing on disk.
+  Remote branches are as of the last fetch, so a branch pushed a minute ago is not in the output until `octok fetch`.
+  The only network use is `ssh`, for the repositories on [another machine](locations.md).
+- **`repos:`** has a line per repository, in project order: key, alias, base branch in effect (the repository's own, else the project's) and the tip of that branch as of the last fetch.
+  A repository on another machine ends with its location, such as `[api-dev-1:/home/ubuntu/.octotask]`.
+- **`workspaces:`** has a group per workspace, in alphabetical order, with its folder on this machine when it has one.
+  Below it, a row per repository of the project, with the branch and commit of its checkout, so a missing checkout stands out.
+- **`orphan caches`** lists the clones in the cache folder that no repository of the project owns, on every machine the project uses, as `<host>:<path>` on another machine.
+  A key renamed by hand in the project file leaves one behind; `octok status` only reports it, and you can delete the folder.
+- **Errors:** a checkout that cannot be read does not hide the other rows, and the command still exits with code 0.
+  A machine that cannot be reached fails the whole command with the error of `ssh` and exit code 7; without a terminal, `ssh` fails instead of asking a question.
+- **A closed pipe**, as in `octok status | head -1`, ends the command quietly.
+
+What a line can show:
+
+| Text | Where | Meaning and fix |
+|---|---|---|
+| ``branch `<base>` is not on the remote`` | `repos:` | The base branch was not on the remote at the last fetch, so new branches cannot start from it: fix it with [`octok repo set <repo> --base`](repo.md) or [`octok project set --base`](project.md). |
+| ``not fetched (run `octok fetch`)`` | `repos:` | There is no clone yet: `octok fetch` makes it. |
+| `(detached)` | checkout | The checkout is on a detached HEAD. |
+| `[not on the remote]` | checkout | The branch was not on the remote at the last fetch: a new branch until its `git push`, or a branch deleted on the remote. |
+| `[<host>:<path>]` | checkout | The checkout lives on another machine, at that path. |
+| `` no worktree: add it with `octok checkout <branch>` `` | checkout | The repository has no checkout in the workspace, for example because it was registered later: see [Workspaces](workspaces.md#example-complete-a-workspace). The hint names the branch, or says `<branch>` when no checkout of the workspace has one to read. |
+| `cannot be read: <reason>` | checkout | The branch and commit could not be read; the reason is the last line of the error of `git`. |
+| `none (add one with ...)` | `repos:`, `workspaces:` | The project has no repositories, or no workspaces. |
+
+## Example: a project with a workspace
 
 ```console
 $ octok project init shop
@@ -37,73 +75,10 @@ workspaces:
     shop-backend (backend)    feat/cart  de08597  Fix order totals (5 hours ago)  [not on the remote]
 ```
 
-## What each part shows
+## Example: when something is off
 
-### `project:`
-
-The name of the project.
-
-### `repos:`
-
-One line per repository, in the order of the project:
-
-```text
-  <key> (<alias>)  <base branch>  <last commit of the base branch>
-```
-
-- The label is the key, followed by the alias in parentheses when there is one.
-- The base branch is the one in effect: the repository's own, else the project's.
-- The commit is the tip of that base branch in the cache, as of the last fetch: its abbreviated hash, its subject and its age.
-  It is not asked to the remote.
-- A repository on another machine ends with its location in brackets, such as `[api-dev-1:/home/ubuntu/.octotask]`.
-  A repository on this machine shows nothing.
-
-Instead of the commit, a line can say:
-
-| Text | Meaning |
-|---|---|
-| ``branch `<base>` is not on the remote`` | The repository is cloned, but its base branch was not on the remote at the last fetch. New branches cannot start from it: fix it with [`octok repo set <repo> --base`](repo.md) or [`octok project set --base`](project.md). |
-| ``not fetched (run `octok fetch`)`` | There is no clone of the repository yet. `octok fetch` makes it. |
-
-A project without repositories shows ``repos: none (add one with `octok repo add <url>`)``.
-
-### `workspaces:`
-
-One group for each workspace the project has, in alphabetical order of their names.
-The first line has the name of the workspace and its folder, which is the one on this machine when the workspace has one there.
-Below it, one row for every repository of the project, in the order of the project, so a repository without a checkout stands out:
-
-```text
-    <key> (<alias>)  <branch>  <commit of the checkout>  [<marker>]
-```
-
-- The branch is the one the checkout is on, `(detached)` on a detached HEAD.
-- The commit is the one checked out: hash, subject and age.
-- `[not on the remote]` follows the commit of a checkout whose branch was not on the remote at the last fetch.
-  It is what a new branch shows until a `git push`, and what a branch shows after it was deleted on the remote and a fetch dropped it.
-- `[<host>:<path>]` follows the commit of a checkout that lives on another machine, and tells where.
-- `` no worktree: add it with `octok checkout <branch>` `` replaces a repository that has no checkout in the workspace, for example one registered after the workspace was created.
-  See [Workspaces](workspaces.md#complete-a-workspace).
-- `cannot be read: <reason>` replaces a checkout whose branch and commit could not be read, with the last line of the error of the tool.
-  It does not hide the other repositories, and the command still exits with code 0.
-
-A project without workspaces shows ``workspaces: none (create one with `octok branch <name>`)``.
-
-### `orphan caches`
-
-After the workspaces, a section lists the clones in the cache folder that no repository of the project owns, one path per line, on every machine the project uses, as `<host>:<path>` on another machine:
-
-```text
-orphan caches (not in the project file):
-  /Users/you/.octotask/cache/shop/old.git
-```
-
-They are left behind when a repository key is renamed by hand in the project file.
-`octok status` only reports them: nothing deletes them, and you can delete the folder if you do not need it.
-
-## When something is off
-
-This session breaks a project in several ways at once, to show how `octok status` reports each of them:
+This session breaks the project in several ways at once: a detached checkout, a repository added after the workspace, a deleted clone, a copied clone and a base branch that is not on the remotes.
+The deleted clone shows `not fetched`, and its checkout `cannot be read`, because its commits lived in that clone; `[..]` stands for the error of `git`, which changes with its version.
 
 ```console
 $ cd shop-frontend
@@ -134,22 +109,7 @@ orphan caches (not in the project file):
   /Users/you/.octotask/cache/shop/old.git
 ```
 
-Reading the output from the top:
-
-- `shop-frontend` and `shop-agent` are cloned, but `develop` is not on their remotes.
-- `shop-backend` has no clone anymore, so it was never fetched as far as `octok` can tell: `octok fetch` clones it again.
-- The checkout of `shop-frontend` is on a detached HEAD, so it shows `(detached)` and no `[not on the remote]` marker.
-- The checkout of `shop-backend` cannot be read, because its commits lived in the clone that is gone.
-  After `cannot be read:` comes the error of `git` as it is, shown here as `[..]` because its text changes with the version of `git`.
-  The other rows are not affected.
-- `shop-agent` has no checkout in `feat-cart`, because it was registered after it.
-  The hint says `<branch>` here only because no checkout of the workspace has a branch left to read: it is the name of the branch otherwise.
-- The clone `old.git` belongs to no repository of the project.
-
-## Repositories on another machine
-
-A repository whose [location](../concepts.md#location) is another machine ends its `repos:` line with that location.
-In a workspace, the checkouts that live there end with their path on that machine:
+## Example: a repository on another machine
 
 ```console
 $ octok project init remote
@@ -177,26 +137,9 @@ workspaces:
     shop-frontend  feat/search  1ec5189  Add cart page (2 days ago)  [not on the remote]
 ```
 
-## What it reads, and what it never does
-
-`octok status` reads:
-
-- the project file;
-- the clone of each repository, for the remote branches as they were at the last fetch and for the commit of the base branch;
-- the checkout of each repository in each workspace, for its branch and its last commit.
-
-It does not run `git fetch`, `git ls-remote` or anything else that contacts a git remote, and it changes nothing on disk.
-That is why the markers say "at the last fetch": a branch that someone pushed a minute ago is not in the output until `octok fetch` or [`octok pull`](sync.md).
-The one network use is `ssh`, to read the clones and the checkouts that live on another machine: see [Locations and SSH](locations.md).
-Without a terminal, such a connection never asks a question: it fails instead.
-A machine that cannot be reached fails the whole command with the error of `ssh` and exit code 7, unlike a single checkout that cannot be read.
-
-The output is meant for people.
-With `--json`, `octok status` prints one document with the same information, and with more detail for each repository and checkout: see [JSON output](../agents/json-output.md).
-When the reader of the output goes away, as in `octok status | head -1`, the command ends quietly.
-
 ## Related pages
 
-- [Workspaces](workspaces.md) for creating and completing the workspaces it lists.
-- [Syncing](sync.md) for `octok fetch`, which refreshes what it shows.
-- [Repositories](repo.md) and [Projects](project.md) for the base branch it reports.
+- [Workspaces](workspaces.md), for creating and completing the workspaces it lists.
+- [Syncing](sync.md), for `octok fetch`, which refreshes what it shows.
+- [Repositories](repo.md) and [Projects](project.md), for the base branch it reports.
+- [Locations and SSH](locations.md), for repositories on another machine.

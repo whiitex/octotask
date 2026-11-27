@@ -2,16 +2,13 @@
 
 A first session with `octok`: one project with two repositories, a workspace on a new branch, a commit pushed from it, a sync and a clean removal.
 
-Every example on this page is run against real git repositories, so the output you see is what `octok` prints.
-The repositories are `shop-frontend` and `shop-backend`, two repositories of a company called `acme`.
-To follow along, use the URLs of two repositories of yours that you can clone and push to, and the branch your features start from in place of `staging`.
+The examples use two repositories of a company called `acme`, `shop-frontend` and `shop-backend`.
+To follow along, use two repositories you can clone and push to, and the branch your features start from in place of `staging`.
 If `octok` is not installed yet, start with [Installation](installation.md).
 
 ## Create a project
 
-A [project](../concepts.md#project) is a named group of repositories.
-It has a [base branch](../concepts.md#base-branch): the branch every new feature starts from.
-The base branch defaults to `staging`.
+A [project](../concepts.md#project) is a named group of repositories, with a [base branch](../concepts.md#base-branch) every new feature starts from, `staging` by default:
 
 ```console
 $ octok project init shop
@@ -19,18 +16,13 @@ created project `shop` (base: staging) at /Users/you/.octotask/projects/shop.yam
 `shop` is now the default project
 ```
 
-`octok` wrote `~/.octotask/projects/shop.yaml` and made `shop` the default project, so the next commands need no `-p shop`.
-Everything `octok` keeps is under `~/.octotask`, its [data folder](installation.md#the-data-folder).
-
-At a terminal, `octok project init` also asks for the settings that no flag gives: the base branch and the [location](../concepts.md#location), the machine where the repositories live.
-Each question shows its default between brackets, such as `Base branch [staging]:`, and Enter keeps it.
-The examples on this page run without a terminal, so no question appears in them.
-See [Projects](../commands/project.md) for the other project commands.
+`shop` is now the default project, so the next commands need no `-p shop`.
+At a terminal, `octok project init` also asks for the base branch and the [location](../concepts.md#location), the machine where the repositories live: Enter keeps the default between brackets.
+See [Projects](../commands/project.md).
 
 ## Add repositories
 
-Each [repository](../concepts.md#repository) is registered by its URL.
-`--alias` gives it a short name that you can type instead of its key.
+Register each [repository](../concepts.md#repository) by its URL, with `--alias` for a short name:
 
 ```console
 $ octok repo add git@github.com:acme/shop-frontend.git --alias frontend
@@ -42,28 +34,27 @@ shop-frontend (frontend)  staging  git@github.com:acme/shop-frontend.git
 shop-backend (backend)    staging  git@github.com:acme/shop-backend.git
 ```
 
-Each repository was cloned once into the [cache](../concepts.md#cache), at `~/.octotask/cache/shop/<key>.git`.
-The key of a repository, here `shop-frontend`, is taken from the URL, and it is the name of its folder in every workspace.
-At a terminal, `octok repo add` asks for the location and, once the repository is cloned, for its base branch: Enter makes the repository follow the project.
-See [Repositories](../commands/repo.md) for `--name`, `--base`, `--location` and those questions.
+Each repository is cloned once into the [cache](../concepts.md#cache).
+Its key, here `shop-frontend`, comes from the URL and names its folder in every workspace.
+At a terminal, `octok repo add` also asks for the location and the base branch: Enter makes the repository follow the project.
+See [Repositories](../commands/repo.md).
 
 ## Create a workspace
 
-`octok branch` creates the branch `feat/cart` in every repository, from the up-to-date base branch of each one, and checks it out in a new [workspace](../concepts.md#workspace).
-It prints the path of the workspace, so `cd "$(...)"` takes you there.
+`octok branch` creates `feat/cart` in every repository, from its up-to-date base branch, and checks it out in a new [workspace](../concepts.md#workspace).
+It prints the path, so `cd "$(...)"` enters it:
 
 ```console
 $ cd "$(octok branch feat/cart)"
 created workspace `feat-cart` in shop
 ```
 
-The workspace is the folder `~/.octotask/workspaces/shop/feat-cart`: its name is the branch with `/` replaced by `-`.
-See [Workspaces](../commands/workspaces.md) for the details, and [Pull request review](../commands/pr-review.md) for a workspace that starts from existing pull requests.
+The workspace is named after the branch, with `/` replaced by `-`.
+See [Workspaces](../commands/workspaces.md).
 
 ## Look around
 
-The workspace has one folder per repository.
-Each one is a normal git working tree on the branch `feat/cart`.
+The workspace has one folder per repository, each a normal git working tree on `feat/cart`:
 
 ```console
 $ pwd
@@ -79,10 +70,9 @@ $ git -C shop-frontend log --oneline
 17d7cc6 Initial commit
 ```
 
-The frontend starts from the commit of its base branch, `staging`, which is ahead of `main`.
-The folders are git worktrees of the caches, so no repository was cloned again to create them.
-
 ## See the state of the project
+
+`octok status` shows the last commit of each base branch and of each checkout, without contacting the remotes:
 
 ```console
 $ octok status
@@ -98,15 +88,13 @@ workspaces:
     shop-backend (backend)    feat/cart  de08597  Fix order totals (5 hours ago)  [not on the remote]
 ```
 
-`octok status` shows every repository with the last commit of its base branch, and every workspace with the branch and the last commit of each checkout.
-`[not on the remote]` says that the branch exists only on your machine.
-It does not contact the git remotes, so it answers at once.
+`[not on the remote]` marks a branch that exists only on your machine.
 See [Status](../commands/status.md).
 
 ## Make a commit and push
 
 Work in a checkout as in any git repository.
-A plain `git push` publishes the new branch and sets its upstream, with no `-u origin feat/cart`.
+A plain `git push` publishes the new branch and sets its upstream:
 
 ```console
 $ cd shop-backend
@@ -131,13 +119,11 @@ workspaces:
     shop-backend (backend)    feat/cart  d32a65a  Add cart endpoint (10 minutes ago)
 ```
 
-The branch is now on the remote of `shop-backend`, and the status no longer marks it.
-`shop-frontend` is still local only: each repository is published on its own, when it has something to publish.
+Each repository is published on its own, so `shop-frontend` is still local only.
 
 ## Sync
 
-`octok pull` fetches every repository and fast-forwards each checkout of the workspace to its remote branch.
-Without an argument it uses the workspace of the current folder.
+`octok pull` fetches every repository and fast-forwards each checkout of the current workspace:
 
 ```console
 $ octok pull
@@ -151,7 +137,7 @@ See [Syncing](../commands/sync.md).
 
 ## Remove the workspace
 
-When the feature is done, `octok rm` deletes the workspace: its checkouts, its folder and its local branches.
+When the feature is done, `octok rm` deletes the checkouts, the folder and the local branches of the workspace:
 
 ```console
 $ cd
@@ -167,14 +153,13 @@ repos:
 workspaces: none (create one with `octok branch <name>`)
 ```
 
-`octok rm` refuses to delete a workspace that holds uncommitted changes, unpushed commits or files that do not belong to a checkout, and lists what it found.
-The frontend branch had no commits, so there was nothing to lose here.
-The caches stay, so the next workspace is again created in an instant.
+`octok rm` refuses a workspace with uncommitted changes, unpushed commits or files outside a checkout, and lists them.
+The caches stay, so the next workspace is again ready in an instant.
 
 ## Where to go next
 
 - [Concepts](../concepts.md) defines the words used here.
-- [A feature across several repositories](../guides/multi-repo-feature.md) is this session at a realistic size: teammates who push, a base branch that moves, a repository added later and the cleanup after a squash merge.
-- [Running](../commands/up.md) starts every repository of a workspace with one command, and [Dev changes](../commands/dev.md) keeps your local settings, such as a `.env`, out of every commit.
+- [A feature across several repositories](../guides/multi-repo-feature.md) is this session at a realistic size.
+- [Running](../commands/up.md) starts every repository of a workspace, and [Dev changes](../commands/dev.md) keeps local settings, such as a `.env`, out of every commit.
 - [Reviewing a pull request](../guides/review-pull-request.md) builds a workspace from pull requests.
 - [Command reference](../reference/commands.md) lists every command and option.

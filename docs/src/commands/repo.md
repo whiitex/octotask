@@ -2,11 +2,76 @@
 
 How to register, list, change and unregister the repositories of a project with `octok repo`, and what a key, an alias and a base branch are for.
 
-A [repository](../concepts.md#repository) is registered in a [project](../concepts.md#project) by its git URL.
-`octok repo add` clones it once into the [cache](../concepts.md#cache), and every [workspace](../concepts.md#workspace) is then built from that clone.
-All the commands of this page act on the default project, or on the one named with `-p`: see [Projects](project.md).
+## How to use it
 
-## Register repositories
+1. Register each repository by its git URL: `octok repo add <url> --alias <alias>`.
+   It is cloned once into the cache, and every workspace is built from that clone.
+2. Check what is registered with `octok repo ls`.
+3. Change a setting with `octok repo set <repo> <option>...`, such as the base branch or the [run command](up.md).
+4. Unregister it with `octok repo rm <repo>`.
+
+Every command acts on the default project or on `-p`: see [Projects](project.md).
+A `<repo>` is a key or an alias.
+
+## Options
+
+| Command or option | What it does |
+|---|---|
+| `octok repo add <url>` | Registers and clones the repository. Takes `--name`, `--alias`, `--base` and `--location`. |
+| `octok repo ls` | Lists the repositories. |
+| `octok repo set <repo> <option>...` | Changes one repository. Takes every option below except `--name`. |
+| `octok repo rm <repo>` | Unregisters the repository and deletes its clone. |
+| `--name <key>` | Chooses the key instead of the one of the URL. |
+| `--alias <alias>`, `--no-alias` | Sets or removes the alias. |
+| `--base <branch>`, `--no-base` | Sets the base branch, or goes back to the one of the project. |
+| `--location <location>`, `--no-location` | Puts the clone and the checkouts on another [machine](locations.md), or goes back to the location of the project. |
+| `--url <url>` | Changes the URL and fetches the clone from it. |
+| `--setup <command>`, `--no-setup` | Sets or removes the command that prepares a checkout. See [Running](up.md). |
+| `--run <command>`, `--no-run` | Sets or removes the command that starts the repository. |
+| `--env <name>=<value>`, `--no-env <name>` | Sets or removes an env value of the setup and run commands. Both can be repeated. |
+| `--branch <branch>` | With `--run`, `--no-run`, `--env` and `--no-env` only: changes them in the workspace of that branch alone. |
+
+## Rules
+
+- **Order:** every command lists and handles the repositories in the order they were added.
+- **`repo ls`** shows the key, the alias in parentheses, the base branch in effect and the URL, plus a location column (`local` or a [location](locations.md)) when some repository lives elsewhere.
+  `--json` gives the key, alias, URL, base branch and location.
+- **URL:** anything `git clone` takes: `https://`, `http://`, `ssh://`, `git://`, `file://`, the scp-like `git@github.com:acme/shop-backend.git`, or an absolute path.
+  `octok` runs your own `git`, with your credentials and configuration.
+  On another machine, that machine's `git` clones with its own access, and a path is a path there.
+- **Clone:** `add` clones the whole history, one clone per key even for the same URL.
+  If it fails, nothing is registered and the partial clone is deleted.
+  It prints ``added `<repo>` to <project>: <url>``, and `cloned at <location>` on another machine.
+- **Key:** it names the repository and its folder in every workspace.
+  It is the last part of the URL path without `.git`; `--name` picks another, when two names clash or the URL gives none.
+  It follows the rules of a project name: letters, digits, `.`, `_` and `-`, starting with a letter or a digit, at most 64 characters.
+- **Alias:** a shorter name, accepted wherever the key is (`octok up frontend`, `--pr backend=12`), and printed as `key (alias)`.
+  Keys and aliases share one namespace, so an alias or a key already used by any repository is refused, and so is an alias equal to its own key.
+- **Base branch:** new branches start from the `--base` of the repository, or else from the one of the project.
+  `add` and `set` refuse a base the remote lacks, also after `--url` or `--location`.
+  At a terminal they ask ``branch `develop` is not on the remote of `shop-agent`. Use it as base anyway? [y/N]`` instead, and only `y` or `yes` accepts; with `--json` they never ask.
+- **Location:** without `--location`, a repository follows the project: see [Locations and SSH](locations.md) for the forms and for the location of one workspace.
+- **Questions:** at a terminal, `add` asks for each setting without an option, as in the example below; Enter, or the key, saves no alias, and Enter follows the project for the location and the base.
+  The key is never asked, and an unusable one fails before any question.
+  The machines listed are the `Host` names of `~/.ssh/config` and its includes, at most 15 then `... and N more`, without patterns such as `*.example.com`.
+  A remote machine is tried at once, showing the user, address, port and key files `ssh` uses.
+  The branches listed are the default of the remote, the staging branch (`staging`, `stage`, `stg`, `develop`, `development`, `dev`, `next`, `integration`, `preprod`, `pre-prod`) and the 5 other most recent ones.
+  An unusable answer is asked again, and nothing is asked with every option, `--json`, or no terminal.
+- **`set`** needs one option at least, and refuses an option with its own `--no-` form, or the same env name set and removed.
+  It prints ``updated `<repo>` in <project>`` with the new alias, or ``updated `<repo>` in workspace `<workspace>` of <project>`` with `--branch`.
+  A change of base, URL or location fetches the clone first, and if that fails nothing changes.
+- **Moving** deletes the clone on the old machine, with its saved [dev changes](dev.md), and clones it again on the new one.
+- **`set --location` and `rm`** are refused while a workspace has a checkout, whose commits live in the clone; `rm` names the workspaces.
+- **`rm`** deletes the clone and saved dev changes wherever they are, and forgets the settings of the repository in the workspaces.
+  It never touches the remote, and `octok repo add` brings the repository back.
+
+| Exit code | When |
+|---|---|
+| 2 | An invalid URL, a URL that gives no key, or an option with its `--no-` form. |
+| 3 | A `<repo>` that is not registered, or a base branch the remote lacks. |
+| 5 | A key or an alias already used, or `set --location` or `rm` while a workspace has a checkout. |
+
+## Example: register repositories
 
 ```console
 $ octok project init shop
@@ -24,10 +89,6 @@ shop-backend (backend)    staging  git@github.com:acme/shop-backend.git
 shop-agent                staging  git@github.com:acme/shop-agent.git
 ```
 
-The repositories are listed in the order they were added, and that is the order every other command uses for them.
-Each row shows the key, the alias in parentheses when there is one, the base branch in effect and the URL.
-When some repository lives on another machine, a last column shows its [location](../concepts.md#location), `local` for the others.
-With `--json`, `octok repo ls` prints the same rows with the key, alias, URL, base branch and location of each repository.
 A project without repositories says how to add one:
 
 ```console
@@ -40,22 +101,7 @@ $ octok project use shop
 default project: shop
 ```
 
-## `octok repo add`
-
-```text
-octok repo add <url> [--name <key>] [--alias <alias>] [--base <branch>] [--location <location>]
-```
-
-Registers the repository and clones it into the cache, with the whole history of its remote.
-Nothing is registered if the clone fails, and a clone made by the command is deleted again.
-It prints ``added `<repo>` to <project>: <url>``, and `cloned at <location>` when the clone is on another machine.
-
-### The URL
-
-The URL is anything `git clone` takes: `https://`, `http://`, `ssh://`, `git://` and `file://` URLs, the scp-like form `git@github.com:acme/shop-backend.git`, and an absolute path on this machine.
-`octok` runs your own `git`, so your credentials, your SSH configuration and your git configuration apply.
-For a repository on [another machine](locations.md), the clone is made there, by the `git` of that machine with its own access to the remote, and an absolute path is a path on that machine.
-A text that is not one of these, or that has no path after the host, is refused with exit code 2:
+## Example: what `add` refuses
 
 ```console
 $ octok repo add 'not a url'
@@ -64,12 +110,7 @@ $ octok repo add https://github.com/
 error: invalid git url `https://github.com/`
 ```
 
-### The key
-
-The key identifies the repository in the project and is the name of its folder in every workspace.
-It is the last part of the path of the URL without `.git`: `git@github.com:acme/shop-frontend.git` gives `shop-frontend`.
-`--name <key>` chooses another key.
-It is needed when two repositories have the same name, or when the URL gives no usable key:
+A key taken, or missing from the URL, needs `--name`:
 
 ```console
 $ octok repo add git@github.com:acme/shop-frontend.git
@@ -83,17 +124,7 @@ $ octok repo rm web
 removed `web` from shop
 ```
 
-A key, like a project name, has letters, digits, `.`, `_` and `-`, starts with a letter or a digit and has at most 64 characters.
-A key that is already taken is refused with exit code 5.
-The clone of each repository is separate, even when two keys have the same URL.
-
-### Aliases
-
-`--alias <alias>` gives the repository a shorter name that is accepted wherever the key is: `octok repo set backend ...`, `octok up frontend`, `--pr backend=12`.
-Commands print the repository as `key (alias)`.
-Keys and aliases share one namespace, so a name always points to one repository: an alias that is the key or the alias of another repository is refused, and so is a key that is the alias of another one.
-An alias equal to the key of the repository itself is refused as well, with the same message.
-These refusals exit with code 5.
+`frontend` is the alias of `shop-frontend`:
 
 ```console
 $ octok repo add git@github.com:acme/shop-agent.git --name agent2 --alias frontend
@@ -101,14 +132,6 @@ error: alias `frontend` is already used by repo `shop-frontend`
 $ octok repo add git@github.com:acme/shop-agent.git --name frontend
 error: alias `frontend` is already used by repo `shop-frontend`
 ```
-
-The second error has the same message, because `frontend` is the alias of `shop-frontend` and the new key would be a second owner of that name.
-
-### The base branch
-
-Each repository starts its new branches from a base branch: its own `--base <branch>`, or else the base branch of the project.
-The branch has to exist on the remote.
-When it does not, `octok repo add` stops with exit code 3 and registers nothing, unless a person at a terminal confirms:
 
 ```console
 $ octok repo rm shop-agent
@@ -119,26 +142,7 @@ $ octok repo add git@github.com:acme/shop-agent.git
 added `shop-agent` to shop: git@github.com:acme/shop-agent.git
 ```
 
-At a terminal, the same case asks first:
-
-```text
-branch `develop` is not on the remote of `shop-agent`.
-Use it as base anyway? [y/N]
-```
-
-Only `y` or `yes` accepts: anything else, an empty answer included, refuses.
-Without a terminal, or with `--json`, `octok` refuses without asking.
-The same question comes from `octok repo set --base`, and from `--url` or `--location` when the base is missing on the new remote.
-
-### The location
-
-`--location <location>` makes the clone, and later the checkouts, live on another machine, for this repository only.
-Without it the repository follows the project.
-The forms of a location, what the other machine needs and how a workspace can have its own location are in [Locations and SSH](locations.md).
-
-### Questions at a terminal
-
-At a terminal, `octok repo add` asks for what has no option:
+## Example: questions at a terminal
 
 ```text
 $ octok repo add git@github.com:acme/shop-backend.git
@@ -158,53 +162,7 @@ added `shop-backend (backend)` to shop: git@github.com:acme/shop-backend.git
 cloned at api-dev-1:/home/ubuntu/.octotask
 ```
 
-- The alias is asked first, with the key as the default shown.
-  Enter, or the key itself, saves no alias.
-- The location comes next.
-  Enter makes the repository follow the project, and the default shown says where that is.
-- The base branch is asked last, once the repository is cloned and its branches are known.
-  Enter makes the repository follow the base branch of the project.
-- The name is never asked: it is the one in the URL, or `--name`.
-  A name that cannot be used fails before any question.
-- Before the location, `octok` lists the machines that `~/.ssh/config` names, the files it includes covered, at most 15, with `... and N more` after them.
-  Patterns such as `*.example.com` are left out.
-- A location on another machine is tried at once, and `octok` shows the user, the address, the port and the key files that `ssh` uses for it.
-- The branches are listed with the default branch of the remote first, then the staging branch under the names teams use for it (`staging`, `stage`, `stg`, `develop`, `development`, `dev`, `next`, `integration`, `preprod`, `pre-prod`), then the 5 other branches with the most recent commits.
-- An answer that cannot be used is explained and asked again.
-- With every option given, with `--json`, or without a terminal, nothing is asked and the defaults apply.
-
-## `octok repo set`
-
-```text
-octok repo set <repo> [--alias <alias> | --no-alias] [--base <branch> | --no-base]
-               [--url <url>] [--location <location> | --no-location]
-               [--setup <command> | --no-setup] [--run <command> | --no-run]
-               [--env <name>=<value>]... [--no-env <name>]...
-octok repo set <repo> [--run <command> | --no-run] [--env <name>=<value>]... [--no-env <name>]...
-               --branch <branch>
-```
-
-Changes the settings of one repository, given by key or alias.
-At least one option is needed, and they can be combined in one command.
-An option that gives a value and its `--no-` form cannot be used together: the command line is refused with exit code 2.
-A key or alias that is not registered is refused with exit code 3.
-`octok repo set` prints ``updated `<repo>` in <project>``, and the label shows the alias after the change.
-With `--branch` it prints ``updated `<repo>` in workspace `<workspace>` of <project>`` instead.
-
-| Option | What it does |
-|---|---|
-| `--alias <alias>` | Sets or changes the alias. It follows the rules of the shared namespace above. |
-| `--no-alias` | Removes the alias. |
-| `--base <branch>` | Sets the base branch of this repository. |
-| `--no-base` | Goes back to the base branch of the project. |
-| `--url <url>` | Changes the URL and fetches the clone from it. |
-| `--location <location>` | Moves the repository to another machine. |
-| `--no-location` | Goes back to the location of the project. |
-| `--setup <command>`, `--no-setup` | Sets or removes the command that prepares a checkout. See [Running](up.md). |
-| `--run <command>`, `--no-run` | Sets or removes the command that starts the repository. See [Running](up.md). |
-| `--env <name>=<value>` | Sets an env value of the setup and run commands. Can be repeated. See [shared values](up.md#shared-values). |
-| `--no-env <name>` | Removes an env value. Can be repeated. Setting and removing the same name in one command is refused with exit code 2. |
-| `--branch <branch>` | With `--run`, `--no-run`, `--env` and `--no-env` only: changes the run command and the env values in the workspace of that branch alone. See [Running](up.md). |
+## Example: change a repository
 
 ```console
 $ octok repo set agent --alias agent
@@ -223,28 +181,9 @@ $ octok repo set shop-agent --base develop
 error: repo `shop-agent` has no branch `develop` on its remote
 ```
 
-A change of base, URL or location is checked against the remote first, so the clone is fetched.
-If that fails, the project file is left as it was, and so is the URL the clone fetches from.
-A base branch that the remote does not have is refused with exit code 3, as with `octok repo add`.
-A rerun of the same command changes nothing more.
+## Example: unregister a repository
 
-### Moving a repository
-
-A repository changes location only while no workspace has a checkout of it, because the checkouts would be left behind: otherwise the command is refused with exit code 5, as `octok repo rm` is.
-Its clone is deleted on the old machine, together with the saved [dev changes](dev.md), and made again on the new one.
-
-## `octok repo rm`
-
-```text
-octok repo rm <repo>
-```
-
-Unregisters the repository, given by key or alias, and deletes its clone and its saved dev changes, on the machine where they are.
-Its settings in the workspaces are forgotten too.
-It never touches the remote.
-
-It is refused, with exit code 5, while a workspace has a checkout of the repository, because the commits of those checkouts live in the clone.
-The error names the workspaces:
+`feat-cart` has a checkout of `shop-backend`:
 
 ```console
 $ octok branch feat/cart
@@ -257,9 +196,6 @@ removed workspace `feat-cart` from shop
 $ octok repo rm backend
 removed `shop-backend` from shop
 ```
-
-[`octok rm`](workspaces.md#delete-a-workspace) removes a workspace.
-Run `octok repo add` again to bring the repository back: it is cloned again.
 
 ## Related pages
 

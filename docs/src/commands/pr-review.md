@@ -2,25 +2,62 @@
 
 How `octok pr review` builds one workspace with each repository on a pull request or a branch you choose, and what it needs from `gh`.
 
-## What it is for
+## How to use it
 
-A change often spans pull requests with different branch names: one in the backend, another in the agent, nothing in the frontend.
-`octok pr review` builds one [workspace](../concepts.md#workspace) for all of them.
-Each repository you name is on the branch of its pull request, or on the branch you give.
-Every other repository starts from its [base branch](../concepts.md#base-branch), so the workspace is complete and you can run all of it with [`octok up`](up.md).
-The command prints the path of the workspace.
+1. For `--pr` and the picker, install the GitHub CLI `gh` and sign in with `gh auth login`.
+2. Name a pull request or a branch per repository, and enter the workspace: `cd "$(octok pr review --pr backend=12 --branch agent=fix/prompt)"`.
+   At a terminal, `octok pr review` alone lets you pick from the open pull requests.
+3. Run it with [`octok up --branch pr-backend-12`](up.md) and update it with [`octok pull pr-backend-12`](sync.md), or run both from inside the workspace.
+4. Remove it with [`octok rm pr-backend-12`](workspaces.md#example-delete-a-workspace).
 
-```text
-octok pr review [--pr <repo>=<number>]... [--branch <repo>=<branch>]... [--name <name>] [--location <location>] [--allow-stale-dev]
-```
+## Options
 
-`<repo>` is the key or the alias of a repository of the project.
-See the [command reference](../reference/commands.md#octok-pr-review) for the generated list of options.
+| Option | What it does |
+|---|---|
+| `--pr <repo>=<number>` | Takes the branch of that pull request, open, closed or merged. `12` and `#12` both work. Repeatable. |
+| `--branch <repo>=<branch>` | Takes a branch of the remote of `<repo>`, without `gh`. Repeatable. Needed for a branch named only with digits. |
+| `--name <name>` | Names the workspace and the new branch of the other repositories. It must be a valid branch name. |
+| `--location <location>` | Puts the whole workspace on one machine: see [Locations and SSH](locations.md). |
+| `--allow-stale-dev` | Creates the workspace even when saved [dev changes](dev.md) no longer apply. Without it, nothing is created and the error names the file. |
 
-## The usual use
+`<repo>` is the key or the alias of a repository, given once.
+See the [command reference](../reference/commands.md#octok-pr-review) for the generated list.
 
-The project below has three repositories.
-Pull request #12 of the backend is the branch `feat/login`, and the agent has a branch `fix/prompt` with no pull request.
+## Rules
+
+- **Named repositories** get a local branch at the remote branch, fetched just before, which follows it for `git pull`, `git push` and `octok pull`.
+- **Other repositories** get a new branch from their up-to-date [base branch](../concepts.md#base-branch), named after the workspace, local until you push it.
+  If the remote already has a branch with that name, they get that one.
+- **Output:** `` <repo>: pull request #12 is the branch `feat/login` `` goes to stderr before anything is created, and the path to stdout, so `cd "$(...)"` works.
+- **Default name:** `pr-<repo>-<number>` after the first pull request in project order, with the alias when there is one.
+  With only `--branch`, the first branch names both: `--branch agent=fix/prompt` makes the workspace `fix-prompt` and the branch `fix/prompt` in the other repositories.
+- **The picker** lists the 15 newest open pull requests of each repository, titles cut to 72 characters.
+  Type a number to take a pull request, a name to take a branch, or Enter to stay on the base.
+  An answer that cannot be reviewed is asked again, and when `gh` cannot list, `octok` says why and still asks.
+  A repository without any prints `No open pull requests of <repo>.`
+  Choosing nothing anywhere stops with `nothing to review`.
+- **No picker** with `--json` or without a terminal: give at least one `--pr` or `--branch`.
+  It also does not start when the command cannot succeed, such as with no repositories or an invalid `--name`.
+- **Remembered:** the project file keeps what the workspace reviews until `octok rm`.
+  The same command again prints the path and changes nothing, and [`octok checkout <name>`](workspaces.md) completes the workspace on the same branches.
+- **Forks** are refused, because their branch is not in the repository itself, and the picker marks them `from a fork`.
+- **One branch, one workspace:** a branch that another workspace has, such as `feat/login` after `octok checkout feat/login`, is refused with the folder that holds it.
+- **`gh`** runs on this machine, also for a repository on [another machine](locations.md), and fails with its own message for a repository not on GitHub or when not signed in.
+  Nothing else in `octok` needs it.
+- **Nothing left behind:** every refusal comes before anything is created, and `octok rm` also deletes the local branches only this workspace used.
+
+| Exit code | When |
+|---|---|
+| 0 | The workspace was created, or already reviews the same choice. |
+| 1 | `gh` failed, or ``pull request #<number> of `<repo>` comes from a fork: octok can only review a branch of the repo itself``. |
+| 2 | Nothing to review, a repository given twice, or an invalid value. |
+| 3 | A repository not registered, or a branch not on its remote. |
+| 5 | The workspace exists with another choice, or its name belongs to a workspace of `octok branch` or `octok checkout`. |
+| 7 | `` `gh` not found: install it or add it to PATH ``. |
+
+## Example: review a pull request and a branch
+
+Pull request #12 of the backend is the branch `feat/login`, and the agent has a branch `fix/prompt` with no pull request:
 
 ```console
 $ octok project init shop
@@ -56,65 +93,9 @@ workspaces:
     shop-agent (agent)        fix/prompt     1967eea  Shorten the prompt (6 hours ago)
 ```
 
-The line about the pull request goes to stderr, and the path of the workspace goes to stdout, so `cd "$(...)"` enters the workspace and still shows the line.
-When you are done, remove the workspace with [`octok rm pr-backend-12`](workspaces.md#delete-a-workspace).
-It also deletes the local branches that the workspace checked out, unless another workspace has them.
+## Example: the picker
 
-## What each repository gets
-
-- A repository with `--pr` or `--branch` gets a local branch at the commit of the remote branch, and that branch follows the remote one.
-  `git pull`, `git push` and [`octok pull`](sync.md) work on it.
-- Any other repository gets a new branch from its up-to-date base branch, named after the workspace, so the workspace is complete.
-  In the example, that is `pr-backend-12` in `shop-frontend`.
-  The branch exists only on your machine until you push it.
-  If the remote of that repository already has a branch with that name, it gets that branch instead.
-- The command fetches the repositories first, so a branch is read as it is on the remote now.
-- The message `created workspace` lists the repositories by where their branch came from: `branch from the remote` and `new branch from the base`.
-
-## The options
-
-### `--pr <repo>=<number>`
-
-Reviews the pull request `<number>` of `<repo>`.
-`12` and `#12` both work after the `=`.
-`octok` asks `gh` for the branch of that pull request, whatever its state: open, closed or merged.
-It prints `` <repo>: pull request #12 is the branch `feat/login` `` on stderr before it creates anything, with the repository shown as in the example above.
-You can repeat the option for other repositories.
-
-### `--branch <repo>=<branch>`
-
-Reviews the branch `<branch>` of `<repo>`, which must be on the remote of that repository.
-It never calls `gh`, so it works for a branch with no pull request, and when `gh` is not installed.
-You can repeat the option for other repositories.
-A branch whose name is only digits needs `--branch`, because the picker below reads a number as a pull request.
-
-A repository can be given once: `--pr backend=12 --branch backend=feat/login` is refused.
-
-### `--name <name>`
-
-Names the workspace and the branch of the repositories left on their base.
-The name is checked like a branch name, and a workspace is named after a branch with `/` replaced by `-`: see [workspaces](workspaces.md).
-
-Without `--name`, the workspace is named `pr-<repo>-<number>` after the first pull request, in the order of the repositories of the project, using the alias of the repository when it has one.
-With only `--branch`, it is named after the first of those branches, in the same order.
-So `--branch agent=fix/prompt` alone makes the workspace `fix-prompt`, on the branch `fix/prompt` in every repository that has no choice.
-
-Use the name with the other commands: `octok up --branch pr-backend-12`, `octok pull pr-backend-12`, `octok rm pr-backend-12`.
-
-### `--location <location>`
-
-Puts the whole workspace on another machine, as `octok branch --location` does.
-See [Locations and SSH](locations.md).
-
-### `--allow-stale-dev`
-
-Creates the workspace even when some of your saved [dev changes](dev.md) no longer apply to the branch a checkout starts from.
-Without it, nothing is created and the error names the file.
-
-## At a terminal
-
-Without `--pr` and `--branch`, and at a terminal, `octok` asks what to take for each repository.
-It lists the open pull requests of the repository, the 15 newest, and asks:
+At a terminal, without `--pr` or `--branch`, each repository gets a question:
 
 ```text
 Open pull requests of shop-backend (backend):
@@ -123,26 +104,9 @@ Open pull requests of shop-backend (backend):
 Pull request or branch of shop-backend (backend) [none, base `staging`]:
 ```
 
-- A number such as `12` or `#12` takes that pull request.
-- A name takes that branch.
-- Enter leaves the repository on its base branch.
-- A title is cut to 72 characters and shows no control characters.
-- A repository with no open pull request prints `No open pull requests of <repo>.`
-- When `gh` cannot list the pull requests of a repository, `octok` prints why and asks anyway: you can still type a branch.
-- An answer that cannot be reviewed is explained and asked again, for example a branch that is not on the remote of the repository, or a pull request from a fork.
-- If you leave every repository on its base, the command stops with `nothing to review`, exit code 2, and creates nothing.
+## Example: run it again and complete it
 
-The questions stop before they start when the command cannot succeed, for example a project with no repositories or a `--name` that is not a valid branch name.
-With `--json` or without a terminal nothing is asked: at least one `--pr` or `--branch` is needed.
-
-## What is remembered
-
-A workspace made by `octok pr review` remembers what it reviews in the project file, until [`octok rm`](workspaces.md) removes the workspace.
-The checkouts then know their branch, and:
-
-- Running the same command again prints the path of the existing workspace and changes nothing.
-- [`octok checkout <name>`](workspaces.md) completes a workspace that lacks some checkouts, such as a repository registered after it was made or a folder you deleted, and puts each one on the branch it had.
-- A different choice for a workspace that exists is refused with exit code 5, and so is a `--name` that is already the name of a workspace made by `octok branch` or `octok checkout`.
+The same choice reuses the workspace, another one is refused, and `octok checkout` restores a deleted checkout on its branch:
 
 ```console
 $ octok pr review --pr backend=12 --branch agent=fix/prompt
@@ -161,35 +125,16 @@ $ git -C "$OCTOTASK_HOME/workspaces/shop/pr-backend-12/shop-agent" branch --show
 fix/prompt
 ```
 
-## Pull requests from forks
+## Example: what is refused
 
-A pull request from a fork is refused: its branch is not in the repository itself, so `octok` has nothing to check out from the remote it clones.
-The message is ``pull request #<number> of `<repo>` comes from a fork: octok can only review a branch of the repo itself``, with exit code 1.
-At a terminal, the list marks such a pull request with `from a fork`, and choosing it asks again.
-
-## One branch, one workspace
-
-git keeps a branch in one checkout at a time.
-A branch that another workspace already has is refused, with the folder that holds it, and nothing is created:
+A branch already in another workspace:
 
 ```text
 error: branch `feat/login` of `shop-backend` is already checked out in /Users/you/.octotask/workspaces/shop/feat-login/shop-backend
 a branch lives in one workspace at a time: use that workspace, or remove it first
 ```
 
-This is why `octok pr review --pr backend=12` fails once you have run `octok checkout feat/login`: the workspace `feat-login` already holds the branch.
-
-## What needs `gh`
-
-`--pr` and the list of pull requests at a terminal use the GitHub CLI `gh`, which must be installed and signed in with `gh auth login`.
-`octok` runs `gh pr view` for `--pr` and `gh pr list` for the picker, with the URL of the repository, so a repository that is not on GitHub or a `gh` that is not signed in fails with the message of `gh`.
-If `gh` is missing, the error is `` `gh` not found: install it or add it to PATH `` with exit code 7.
-`gh` always runs on this machine, also for a repository that lives on [another machine](locations.md).
-Nothing else in `octok` needs `gh`, and `--branch` does not.
-
-## What is refused
-
-The refusals happen before anything is created, so a failed command leaves nothing behind.
+The other refusals:
 
 ```console
 $ octok pr review
@@ -209,4 +154,10 @@ error: `gh pr view 99 --repo git@github.com:acme/shop-backend.git --json number,
 GraphQL: Could not resolve to a PullRequest with the number of 99. (repository.pullRequest)
 ```
 
-The first three are refused with exit code 2, a branch or a repository that is not there with exit code 3, and an error of `gh` with exit code 1.
+## Related pages
+
+- [Workspaces](workspaces.md), for `octok checkout` and `octok rm`.
+- [Syncing](sync.md), for `octok pull`.
+- [Running](up.md), to run the workspace.
+- [Locations and SSH](locations.md), for `--location`.
+- [Troubleshooting](../troubleshooting.md).
