@@ -1,11 +1,9 @@
 # Configuration files
 
-Every file and folder that `octok` writes: the layout of the data folder on this machine and on another one, every field of the project file and of `config.yaml`, and what happens when you edit one by hand.
+Every file and folder that `octok` writes, every field of the project file and of `config.yaml`, and what happens when you edit one by hand.
 
-`octok` keeps all its state under one folder, the data folder.
-It is `~/.octotask` unless the environment variable `OCTOTASK_HOME` names another one.
+`octok` keeps all its state in the data folder: `~/.octotask`, or the folder that `OCTOTASK_HOME` names.
 Nothing is written outside it, except the control sockets of [ssh connections](../commands/locations.md) in `~/.ssh`.
-The vocabulary used here (project, repository, base branch, cache, workspace, location) is defined in [Concepts](../concepts.md).
 
 ## The data folder
 
@@ -19,13 +17,17 @@ The vocabulary used here (project, repository, base branch, cache, workspace, lo
 | `workspaces/<project>/<workspace>/<repo>` | The checkouts of a workspace: one git worktree of the cache for each repository. |
 | `dev/<project>/<repo>/` | The dev changes saved for a repository: `dev/changed`, `dev/new`, `base` and `filter.sh`. |
 
-`<repo>` is always the key of the repository, never its alias.
-A folder is created when it is first needed: a new data folder is empty, and the first `octok project init` writes `registry.lock`, the project file and `config.yaml`.
+- **`<repo>`** is always the key of the repository, never its alias.
+- **A folder is created when first needed:** a new data folder is empty, and the first `octok project init` writes `registry.lock`, the project file and `config.yaml`.
+- **Checkouts are normal git working trees**, written by your own `git`.
+  Their `.git` is a file that points back to the cache.
+- **On another machine:** a repository whose [location](../concepts.md#location) is another machine keeps its cache, its checkouts and its dev changes in the data folder there, and nothing else.
+  The location names that folder: `api-dev-1:/home/ubuntu/.octotask` is `/home/ubuntu/.octotask` on the host `api-dev-1`.
+  The project file, `config.yaml` and every lock stay on this machine, so `cache/shop/shop-frontend.lock` is local even when its cache is not.
 
-The examples on this page share one project, `shop`.
-Its repositories live on another machine by default, and `shop-backend` lives on this one.
-A file is saved as a dev change in `shop-backend`, and two workspaces exist.
-This is the data folder on this machine, down to three levels:
+## Example: the data folder
+
+The examples of this page share the project `shop`: its repositories live on `api-dev-1`, except `shop-backend`, which lives here and has a saved dev change.
 
 ```console
 $ octok project init shop --location api-dev-1
@@ -77,63 +79,10 @@ $ find .octotask -maxdepth 3 | sort
 .octotask/workspaces/shop/pr-backend-12
 ```
 
-The dev changes of a repository are a folder of their own, kept on the machine of the repository:
-
-```console
-$ find .octotask/dev | sort
-.octotask/dev
-.octotask/dev/shop
-.octotask/dev/shop/shop-backend
-.octotask/dev/shop/shop-backend/base
-.octotask/dev/shop/shop-backend/dev
-.octotask/dev/shop/shop-backend/dev/changed
-.octotask/dev/shop/shop-backend/dev/new
-.octotask/dev/shop/shop-backend/dev/new/.env
-.octotask/dev/shop/shop-backend/filter.sh
-```
-
-The files of git inside `cache/` and of the checkouts are the ones git writes: `octok` runs your own `git`, so every checkout is a normal working tree.
-Its `.git` is a file that points back to the cache.
-
-### On another machine
-
-A repository whose [location](../concepts.md#location) is another machine keeps its cache, its checkouts and its dev changes in the data folder of that machine, and nothing else.
-The location says which folder: `api-dev-1:/home/ubuntu/.octotask` is the folder `/home/ubuntu/.octotask` on the host `api-dev-1`.
-The project file, `config.yaml` and `registry.lock` stay on this machine only, so the other machine has no `projects/` folder and no lock file.
-
-```console
-$ ssh api-dev-1 'find .octotask -maxdepth 4 | sort'
-.octotask
-.octotask/cache
-.octotask/cache/shop
-.octotask/cache/shop/shop-frontend.git
-.octotask/cache/shop/shop-frontend.git/FETCH_HEAD
-.octotask/cache/shop/shop-frontend.git/HEAD
-.octotask/cache/shop/shop-frontend.git/config
-.octotask/cache/shop/shop-frontend.git/description
-.octotask/cache/shop/shop-frontend.git/hooks
-.octotask/cache/shop/shop-frontend.git/info
-.octotask/cache/shop/shop-frontend.git/objects
-.octotask/cache/shop/shop-frontend.git/refs
-.octotask/cache/shop/shop-frontend.git/worktrees
-.octotask/dev
-.octotask/dev/shop
-.octotask/workspaces
-.octotask/workspaces/shop
-.octotask/workspaces/shop/feat-cart
-.octotask/workspaces/shop/feat-cart/shop-frontend
-.octotask/workspaces/shop/pr-backend-12
-.octotask/workspaces/shop/pr-backend-12/shop-frontend
-```
-
-The locks of a cache are taken on this machine, so `cache/shop/shop-frontend.lock` is in the local data folder even though the cache is not.
-Everything `octok` reads from the other machine it asks over `ssh`: see [Locations and SSH](../commands/locations.md).
-
 ## The project file
 
 `projects/<project>.yaml` holds one project.
-`octok` writes it whenever a command changes the project, and reads it at the start of every command.
-This is the file of `shop`: a location, two repositories that set their own values, a workspace with its own run command and a workspace that reviews a pull request:
+This is the file of `shop`, with a workspace that has its own run command and one that reviews a pull request:
 
 ```console
 $ cat .octotask/projects/shop.yaml
@@ -166,9 +115,9 @@ workspaces:
         run: PORT=9005 uv run main.py
 ```
 
-Only `version`, `name`, `base` and `repos` are always written, `repos` as `repos: {}` while the project has none.
-Any other field with no value is left out of the file, not written as `null`.
-The keys of `repos` and `workspaces` keep the order in which they were added.
+- **Always written:** `version`, `name`, `base` and `repos`, as `repos: {}` while the project has none.
+  Any other field with no value is left out, not written as `null`.
+- **Order:** the keys of `repos` and `workspaces` keep the order in which they were added.
 
 ### Project
 
@@ -178,7 +127,7 @@ The keys of `repos` and `workspaces` keep the order in which they were added.
 | `name` | yes | The name of the project. It must be the file name without `.yaml`. |
 | `base` | yes | The [base branch](../concepts.md#base-branch) of every repository that does not set its own. |
 | `location` | no | Where the repositories live unless they say otherwise. Left out means this machine. |
-| `repos` | no | The registered repositories, by key. Left out when you edit the file means none; `octok` always writes it. |
+| `repos` | no | The registered repositories, by key. Left out means none. |
 | `workspaces` | no | The settings of the workspaces that have any, by workspace name. |
 
 ### Repositories
@@ -193,12 +142,13 @@ Each entry of `repos` is a repository, under its key.
 | `location` | no | Where this repository lives, instead of the location of the project. |
 | `setup` | no | The shell command `octok up` runs to prepare a checkout before its first run, such as `npm ci`. |
 | `run` | no | The shell command `octok up` runs to start the repository, in its checkout. |
-| `env` | no | The env values of `setup` and `run`, by name. A value can read others with templates: see [shared values](../commands/up.md#shared-values). Set by `octok repo set --env`. |
+| `env` | no | The env values of `setup` and `run`, by name. A value can read others with templates: see [shared values](../commands/up.md#rules). Set by `octok repo set --env`. |
 
 ### Workspaces
 
-An entry of `workspaces` exists only while its workspace has a setting of its own, and goes away with the last one.
+An entry of `workspaces` exists only while its workspace has a setting of its own.
 It is named like the workspace folder: the branch with `/` replaced by `-`.
+`octok rm` removes it with the workspace, including the entry of a [review](../commands/pr-review.md).
 
 | Field | Required | Value |
 |---|---|---|
@@ -214,8 +164,6 @@ Each entry of a workspace `repos` has:
 | `branch` | no | The branch the repository has in this workspace, instead of the branch of the workspace. Saved by `octok pr review`. |
 | `env` | no | Env values of the repository in this workspace: each replaces the value of the repository with the same name, or adds one. Set by `octok repo set --env --branch`. |
 
-The workspace entry of a review stays until `octok rm`, which also forgets the other settings of that workspace: see [Pull request review](../commands/pr-review.md).
-
 ### Allowed values
 
 | Value | Rule |
@@ -229,12 +177,11 @@ The workspace entry of a review stays until `octok rm`, which also forgets the o
 | Workspace name | Not empty and without `/`. |
 | Keys under a workspace `repos` | They must be repositories of the project. |
 
-The location in the file is always the absolute one, such as `api-dev-1:/home/ubuntu/.octotask`.
-The commands accept `<host>` alone or a relative path and write the absolute path: see [Locations and SSH](../commands/locations.md).
-The key of a repository comes from its URL, as the last part without `.git`, unless `octok repo add --name` gives another.
-
-The `run` and `setup` commands are plain text in this file, and so is everything else in it.
-Do not put a secret in a command: keep it in a `.env` file saved as a [dev change](../commands/dev.md), which never leaves the machine of the repository.
+- **Location:** the file always holds the absolute one.
+  The commands also accept `<host>` alone or a relative path: see [Locations and SSH](../commands/locations.md).
+- **Key:** the last part of the URL without `.git`, unless `octok repo add --name` gives another.
+- **No secrets:** the whole file is plain text, commands included.
+  Keep a secret in a `.env` file saved as a [dev change](../commands/dev.md), which never leaves the machine of the repository.
 
 ## The global config
 
@@ -251,31 +198,33 @@ version: 1
 default_project: shop
 ```
 
-`octok project init` and `octok project use` set `default_project`, and `octok project rm` clears it when it names the project that is removed.
+`octok project init` and `octok project use` set `default_project`, and `octok project rm` clears it when it removes that project.
 A data folder without `config.yaml` is valid: it has no default project.
 
 ## The version field
 
 Both kinds of file start with `version: 1`.
-`octok` reads the version first, and refuses a file with another one before looking at anything else, so a file written by a newer `octok` fails with a clear message and not with a list of unknown fields.
+`octok` refuses a file with another version before reading anything else, so a file written by a newer `octok` fails with a clear message, not a list of unknown fields.
 Nothing is migrated: there is only one version so far.
 
 ## Editing by hand
 
-You can edit a project file or `config.yaml` with an editor.
-`octok` reads the file again at the next command, so the change applies at once.
-Three things to know:
+You can edit a project file or `config.yaml` with an editor, and the next command reads the change.
 
 - **The whole file is checked on every read.**
   A value that breaks a rule above makes every command that uses the project fail, and nothing is changed.
-  The error names the file when the file cannot be read, as in the first four examples below, and only the value when it is read but breaks another rule, as in the fifth.
+  The error names the file when the file cannot be read, and only the value otherwise.
+- **Fields are strict:** a typo is an unknown field and an error, never a setting silently ignored.
 - **`octok` rewrites the whole file when it changes something.**
-  Comments, blank lines and the formatting of your edit are lost, and the fields come back in the order of the tables above.
-- **A write replaces the file as it was read.**
-  An edit saved while an `octok` command is running can be lost if that command writes after it.
+  Comments, blank lines and your formatting are lost, and the fields come back in the order of the tables above.
+- **A write replaces the file as it was read:** an edit saved while an `octok` command runs can be lost.
+- **`octok project ls`** lists every `projects/<project>.yaml` with a valid project name without reading it, so a broken file still shows.
+  A file in `projects/` with any other name is ignored.
 
-These are the errors you get from a file that is not valid.
-Each `printf` replaces the project file or `config.yaml` with a small invalid one, and the next command shows the error:
+## Example: invalid files
+
+Each `printf` writes a small invalid project file: an unknown version, a `name` that differs from the file name (as after copying a project file), an unknown field, a location without a path, and a workspace setting for a repository not in the project.
+The last two break `config.yaml` instead: a missing `version`, then an unknown one.
 
 ```console
 $ cp .octotask/projects/shop.yaml shop.yaml.bak
@@ -302,15 +251,9 @@ $ octok project ls
 error: /Users/you/.octotask/config.yaml: unsupported config version 3 (expected 1)
 ```
 
-The first error is a version the file declares that `octok` does not know.
-The second is a file whose `name` differs from its file name, which happens when you copy a project file to another name.
-The third is a field that does not exist: the fields are checked strictly, so a typo is an error and not a setting that is silently ignored.
-The fourth is a value that breaks a rule, here a location without a path.
-The fifth is a workspace setting for a repository that is not in the project.
-The last two are the same errors in `config.yaml`.
+## Example: a rewrite drops your comment
 
-To start again from the files `octok` wrote, put the copy back.
-The next commands also show that `octok` writes a file again from scratch: the comment added at the end is gone after `octok repo set`.
+Put the copy back, add a comment, and change the project: the comment is gone.
 
 ```console
 $ cp shop.yaml.bak .octotask/projects/shop.yaml
@@ -330,31 +273,21 @@ $ octok project ls
 * shop
 ```
 
-`octok project ls` lists the files in `projects/` whose name is `<project>.yaml` with a valid project name, without reading them, so a broken file still shows in the list.
-A file in `projects/` that has any other name is ignored.
-
 ## Lock files
 
-`registry.lock` and `cache/<project>/<repo>.lock` are empty files that serve as locks.
-Every command that changes a project file or `config.yaml` holds an exclusive lock on `registry.lock` until it ends, and every operation on a cache holds the one of that cache, so two `octok` commands that run at the same time, such as two terminals or an agent next to you, never write the same file at once.
-Reading a file takes no lock, because every write is made to a temporary file in the same folder and then renamed over the real one: a reader sees the old file or the new one, never half of it.
+`registry.lock` and `cache/<project>/<repo>.lock` are empty files used as locks, so two `octok` commands at once, such as two terminals or an agent next to you, never write the same file together.
 
-The operating system releases a lock when the process ends, even when it is killed, so a lock file left behind is not a stuck lock: leave it where it is.
-`octok` never deletes `registry.lock`, and deletes a cache lock only together with its cache.
-A command that finds the lock taken waits for it.
-A temporary file named `.<file>.tmp-<process id>` can stay in a folder only if a process was killed in the middle of a write: it is safe to delete.
-A folder `cache/<project>/<repo>.tmp-<process id>` is a clone that was interrupted, for example by `Ctrl-C`: the next clone of that repository deletes it.
+- **Who waits:** a command that changes a project file or `config.yaml` holds `registry.lock` until it ends, and an operation on a cache holds the lock of that cache.
+  A command that finds a lock taken waits for it.
+  Reading takes no lock, and never sees half a file.
+- **Leftovers:** the system releases a lock when its process ends, even when killed, so a lock file left behind is not stuck: leave it.
+  `octok` never deletes `registry.lock`, and deletes a cache lock only with its cache.
+- **`.<file>.tmp-<process id>`** stays only after a process was killed in the middle of a write: it is safe to delete.
+- **`cache/<project>/<repo>.tmp-<process id>`** is an interrupted clone, for example by `Ctrl-C`: the next clone of that repository deletes it.
 
-```console
-$ find .octotask -name '*.lock' | sort
-.octotask/cache/shop/shop-backend.lock
-.octotask/cache/shop/shop-frontend.lock
-.octotask/registry.lock
-```
+## Related pages
 
-## Related
-
-- [Concepts](../concepts.md) defines the words used here.
+- [Concepts](../concepts.md) defines project, repository, base branch, cache, workspace and location.
 - [Projects](../commands/project.md), [Repositories](../commands/repo.md) and [Workspaces](../commands/workspaces.md) describe the commands that write these files.
 - [Locations and SSH](../commands/locations.md) explains the data folder on another machine.
 - [Dev changes](../commands/dev.md) explains what is in `dev/`.

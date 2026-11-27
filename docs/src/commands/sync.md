@@ -2,26 +2,56 @@
 
 How `octok fetch` updates the clones of every repository of a project and `octok pull` fast-forwards the checkouts of a workspace, and what each one reports.
 
-`octok fetch` brings the [cache](../concepts.md#cache) of every repository of the [project](../concepts.md#project) up to date with its remote.
-`octok pull` does a `fetch` and then moves each checkout of a [workspace](../concepts.md#workspace) forward to the branch its remote has, when that is a plain fast-forward.
-Both commands print one line per repository and keep going when one repository fails.
-Neither one merges, rebases or resets anything.
+## How to use it
 
-## `octok fetch`
+1. Run `octok fetch` to refresh the [cache](../concepts.md#cache) of every repository, so [`octok status`](status.md) shows the remotes as they are now.
+2. Run `octok pull` inside a [workspace](../concepts.md#workspace), or `octok pull <branch>` from anywhere, to fast-forward its checkouts.
+3. Settle a `skipped: diverged from the remote branch` yourself, with git, in that checkout.
 
-```text
-octok fetch
-```
+## Options
 
-For each repository of the project, in the order of the project, `octok fetch`:
+| Command | What it does |
+|---|---|
+| `octok fetch` | Clones or fetches the cache of every repository of the project. |
+| `octok pull [<branch>]` | Fetches the repositories of the workspace, then fast-forwards each checkout. |
 
-- clones the repository into the cache when the cache is not there, for example one that was deleted by hand, or the one of a repository that moved to another machine;
-- otherwise points the clone at the URL that the project file has now, then fetches all the branches of the remote into it.
+## Rules
 
-The fetch prunes: a branch that was deleted on the remote is forgotten by the cache too, and so [`octok status`](status.md) no longer sees it on the remote.
-No workspace is touched: `octok fetch` changes the cache and nothing else.
-A project without repositories prints nothing and exits with code 0.
-It is the one command to run to refresh what `octok status` shows, because `octok status` itself never contacts a git remote.
+- **One line per repository:** both commands go on after a failure and print its reason on stderr as `error: <repo>: <message>`.
+- **`octok fetch` touches only the cache:** it clones a missing one, such as one deleted by hand or after a move, and otherwise points it at the URL of the project file and fetches every branch.
+  A project without repositories prints nothing.
+- **Pruning:** a branch deleted on the remote leaves the cache too, so `octok status` stops showing it.
+- **`octok status` never contacts a remote:** `octok fetch` is how to refresh it.
+- **Which workspace:** without `<branch>`, `octok pull` uses the workspace of the current folder and its project, whatever `-p` or the default project say.
+- **Only fast-forwards:** a checkout behind `origin/<branch>` with no commit of its own moves with `git merge --ff-only`, and any other is left alone.
+  `octok pull` never merges, rebases, resets or creates a commit.
+- **Uncommitted changes** stay: if the fast-forward would overwrite one, git refuses and the line says `failed`.
+- **Pushed elsewhere:** a branch that was new here and was pushed from somewhere else starts to follow the remote branch.
+- **`skipped` is not a failure:** the checkout stays as it is, and the exit code does not change.
+- **Nothing else changes:** neither command pushes or changes a base branch, a setting or a workspace, and `octok pull` fetches only its own repositories.
+- **`--json`** prints one document with the outcome or error of each repository, `cloned` or `fetched` for a fetch: see [JSON output](../agents/json-output.md).
+
+| Line | Meaning |
+|---|---|
+| `fetched` | `octok fetch` updated or cloned the cache. |
+| `updated` | The checkout was behind and was fast-forwarded. |
+| `up to date` | The checkout has every commit of the remote branch, or more. |
+| `skipped: branch is not on the remote yet` | The branch was never pushed, or was deleted on the remote. |
+| `skipped: diverged from the remote branch` | Both sides have commits the other lacks. |
+| `skipped: detached HEAD` | The checkout is not on a branch. |
+| `skipped: no worktree in this workspace` | The repository came after the workspace: add it with [`octok checkout <branch>`](workspaces.md#example-complete-a-workspace). |
+| `failed` | For example an unreachable remote, or a fast-forward that git refused. |
+
+| Exit code | When |
+|---|---|
+| 0 | No repository `failed`. |
+| 2 | `octok pull` outside a workspace, without a branch. |
+| 3 | `octok pull <branch>` for a branch without a workspace. |
+| 6 | At least one repository `failed`, reported after all the others. |
+
+## Example: fetch a project
+
+Every repository of a new project is fetched:
 
 ```console
 $ octok project init shop
@@ -39,35 +69,9 @@ shop-backend (backend)    fetched
 shop-agent (agent)        fetched
 ```
 
-A repository can have two outcomes, and one of them is a failure:
+## Example: pull the commit of a teammate
 
-| Line | Meaning |
-|---|---|
-| `fetched` | The cache is up to date. The text says `fetched` after a clone too: the JSON output says `cloned` or `fetched`. |
-| `failed` | The clone or the fetch did not work. The reason is printed on stderr as `error: <repo>: <message>`. |
-
-## `octok pull`
-
-```text
-octok pull [<branch>]
-```
-
-`octok pull` acts on the workspace of `<branch>`.
-Without `<branch>`, it acts on the workspace whose folder contains the current folder, and the project is the one of that workspace, whatever `-p` or the default project say.
-Outside a workspace and without a branch, it is refused with exit code 2.
-A branch without a workspace is refused with exit code 3.
-
-For each repository of the workspace, `octok pull` fetches its cache and then looks at the checkout:
-
-1. A checkout that is on a branch the remote has is compared with `origin/<branch>`.
-   A local branch that was new when the checkout was made, and that was pushed from somewhere else since, starts to follow the remote branch here.
-2. When the remote branch is already in the checkout, nothing changes.
-3. When the checkout is behind and has no commit of its own, it is fast-forwarded with `git merge --ff-only`.
-4. In every other case, the checkout is left as it is and the line says why.
-
-Only a fast-forward is ever done.
-`octok pull` never merges, rebases or resets, so it never creates a commit, never rewrites one and never drops a local change.
-Uncommitted changes stay in place: if one of them would be overwritten by the fast-forward, git refuses and the repository is reported as `failed`.
+A teammate pushes to `feat/cart` after you, and `octok pull` brings the commit in:
 
 ```console
 $ cd "$(octok branch feat/cart)"
@@ -98,23 +102,9 @@ $ git -C shop-backend log --oneline -1
 5496088 Add checkout endpoint
 ```
 
-The command above is run from inside the workspace.
-From anywhere else, name the branch: `octok pull feat/cart`.
+## Example: a diverged checkout
 
-### What a line says
-
-| Line | What happened |
-|---|---|
-| `updated` | The checkout was behind its remote branch and was fast-forwarded. |
-| `up to date` | The checkout already has every commit of the remote branch. This includes a checkout that is ahead of it. |
-| `skipped: branch is not on the remote yet` | The remote of this repository does not have the branch: it was never pushed, or it was deleted there. There is nothing to pull. |
-| `skipped: diverged from the remote branch` | The checkout and the remote branch each have commits that the other lacks. Only you can decide between a merge and a rebase, with git, in that checkout. |
-| `skipped: detached HEAD` | The checkout is not on a branch. |
-| `skipped: no worktree in this workspace` | The repository was registered after the workspace was created: add its checkout with [`octok checkout <branch>`](workspaces.md#complete-a-workspace). |
-| `failed` | Something went wrong in this repository, such as an unreachable remote or a fast-forward that git refused. The reason is on stderr as `error: <repo>: <message>`. |
-
-A line that starts with `skipped` is not a failure.
-The repository is left as it is, and it does not change the exit code.
+Both sides commit, so the checkout is left alone, with exit code 0:
 
 ```console
 $ cd "$HOME/.octotask/workspaces/shop/feat-cart/shop-backend"
@@ -134,11 +124,9 @@ shop-agent (agent)        skipped: branch is not on the remote yet
 exit code 0
 ```
 
-### Exit codes
+## Example: a broken URL
 
-Both commands exit with code 0 when every repository went well.
-They exit with code 6 when at least one repository is reported `failed`, after they have gone through every repository.
-A broken URL is such a case:
+A wrong URL fails one repository, the others still fetch, and the exit code is 6:
 
 ```console
 $ sed -i.bak 's#acme/shop-agent#acme/nope#' "$HOME/.octotask/projects/shop.yaml"
@@ -154,17 +142,6 @@ Please make sure you have the correct access rights
 and the repository exists.
 exit code 6
 ```
-
-The reasons and the exit codes are described in [JSON output](../agents/json-output.md).
-With `--json`, both commands print one document with the outcome or the error of each repository.
-
-## What is never done
-
-- `octok pull` never merges, rebases or resets, and never creates a commit.
-- `octok pull` leaves a checkout that is diverged, on a detached HEAD or on a branch the remote does not have exactly as it is.
-- Neither command pushes anything.
-- Neither command changes a base branch, a project setting or a workspace.
-- `octok fetch` does not need a workspace, and `octok pull` fetches the repositories of its workspace only.
 
 ## Related pages
 

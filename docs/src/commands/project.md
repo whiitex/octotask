@@ -2,14 +2,59 @@
 
 How to create, list, select, change and delete the projects of `octok`, the groups of repositories that every other command acts on.
 
-A [project](../concepts.md#project) is a named group of repositories with a default [base branch](../concepts.md#base-branch) and, optionally, a default [location](../concepts.md#location).
-Every other command acts on one project: the default one, or the one you name with `-p`.
-The commands of this page create a project, choose which one is the default, change its settings and delete it.
-The repositories of a project are managed with [`octok repo`](repo.md).
+## How to use it
 
-## Create a project and use it
+1. Create a project with `octok project init <name>`: it becomes the default.
+2. Register its repositories with [`octok repo add <url>`](repo.md).
+3. Switch the default with `octok project use <name>`, or name another project for one command with `-p <name>`.
+4. Delete it with `octok project rm <name>`, after [`octok rm <branch>`](workspaces.md) of its workspaces.
 
-`octok project init <name>` creates the project and makes it the default:
+## Options
+
+| Command | What it does |
+|---|---|
+| `octok project init <name> [--base <branch>] [--location <location>]` | Creates `~/.octotask/projects/<name>.yaml` and makes it the default. The base defaults to `staging`, the location to this machine, `local`. |
+| `octok project ls` | Lists the projects alphabetically, `*` on the default. |
+| `octok project use <name>` | Makes `<name>` the default. |
+| `octok project set --base <branch>` | Changes the base branch. |
+| `octok project set --location <location>` | Moves the repositories to that [machine](locations.md). `--no-location` brings them back here. |
+| `octok project rm <name> [--force]` | Deletes the project. `--force` deletes its workspaces too. |
+| `-p <project>`, `--project <project>` | Acts on another project for one command. It goes before or after the command, as `--json` does. |
+
+## Rules
+
+- **`init` creates only the file,** no clone or folder, and never overwrites a project.
+  It does not check the base branch, since there is no repository yet: `octok repo add` does.
+  With `--location` it reaches the machine first, so an unreachable one leaves nothing behind.
+- **Names:** letters, digits, `.`, `_` and `-`, starting with a letter or a digit, at most 64 characters.
+  The base must be a branch name git accepts.
+- **Questions:** at a terminal, `init` asks for each setting without an option, default in brackets, listing the `Host` names of `~/.ssh/config`.
+  Enter keeps the default, and an unusable answer is asked again.
+  Nothing is asked without a terminal, with `--json`, or with both options.
+- **Default project:** the one made default last.
+  Every command acts on it or on `-p`, except `octok project init`, `ls`, `use`, `rm` and `octok docs`, which ignore `-p`.
+  [`octok pull`](sync.md), [`octok up`](up.md) and [`octok dev save`](dev.md) without a branch act on the workspace of the current folder, whatever `-p` says.
+- **`set`** needs one option at least; with `--base` and `--location` the base changes first, and stays if the location is refused.
+- **`set --base`** leaves alone the repositories with their own base.
+  It warns on stderr about fetched repositories whose remote lacked their base at the last fetch, without contacting the remotes, and changes it anyway.
+- **`set --location`** is refused while the project has workspaces.
+  The clones of repositories without their own location are deleted, with their saved [dev changes](dev.md), and made again on the new machine.
+  It prints one line per repository, as [`octok fetch`](sync.md) does: `fetched` for a clone too, which the JSON output tells apart.
+- **`rm`** deletes, on every machine of the project, its file, clones, workspaces and saved dev changes, without asking.
+  It removes the `octok` folder of another machine when this was its last project, and never touches other projects or the remotes.
+  Afterwards, if it was the default, there is no default project.
+- **`rm` with workspaces** is refused, since they may hold work found nowhere else; `--force` deletes them with their uncommitted changes and unpushed commits.
+- **`rm` of a broken project:** clones go before the file, so after a failure the project stays and `octok fetch` clones again.
+  A file that cannot be read, such as one mistyped by hand, is still deleted, cleaning only this machine.
+
+| Exit code | When |
+|---|---|
+| 2 | An invalid name or base branch, or no `-p` and no default project. |
+| 3 | No such project, for `-p` or `use`: ``error: project `nope` not found``. |
+| 5 | `init` of an existing name, or `set --location` or `rm` while the project has workspaces. |
+| 6 | `set --location` could not clone a repository. |
+
+## Example: create projects and choose the default
 
 ```console
 $ octok project init shop
@@ -22,10 +67,6 @@ $ octok project ls
 * blog
   shop
 ```
-
-`octok project ls` marks the default project with `*`.
-It shows the project that was made the default last, so after the second `init` the default is `blog`.
-`octok project use <name>` selects another one:
 
 ```console
 $ octok project use shop
@@ -42,13 +83,9 @@ $ OCTOTASK_HOME=/Users/you/empty octok project ls
 no projects yet: create one with `octok project init <name>`
 ```
 
-The project names are listed in alphabetical order.
+## Example: act on another project
 
-## The default project and `-p`
-
-Every command except `octok project init`, `ls`, `use`, `rm` and `octok docs` acts on the default project.
-The global option `-p <project>` (or `--project <project>`) acts on another project for one command, without changing the default.
-It goes before or after the command, as with `--json`:
+`-p blog` leaves the default on `shop`:
 
 ```console
 $ octok repo add git@github.com:acme/shop-frontend.git
@@ -59,35 +96,14 @@ $ octok repo ls
 shop-frontend  staging  git@github.com:acme/shop-frontend.git
 ```
 
-Without `-p` and without a default project, a command is refused with exit code 2:
+With no `-p` and no default project:
 
 ```console
 $ OCTOTASK_HOME=/Users/you/empty octok status
 error: no project given and no default project set (use `octok project use <name>`)
 ```
 
-A project that does not exist is refused with exit code 3: `octok -p nope status` prints ``error: project `nope` not found``.
-`octok project init`, `ls`, `use` and `rm` take the project as an argument or need none, so they ignore `-p`.
-`octok project use` refuses a name that is not a project, with exit code 3.
-[`octok pull`](sync.md#octok-pull), [`octok up`](up.md) and [`octok dev save`](dev.md) without a branch act on the workspace that contains the current folder, and so on its project, whatever `-p` and the default project say.
-
-## `octok project init`
-
-```text
-octok project init <name> [--base <branch>] [--location <location>]
-```
-
-Creates the file of the project in `~/.octotask/projects/<name>.yaml` and makes the project the default.
-It does not create any repository, clone or folder.
-
-| Option | What it sets |
-|---|---|
-| `--base <branch>` | The default base branch of the repositories. The default is `staging`. |
-| `--location <location>` | The machine where the repositories live, unless one of them says otherwise. The default is this machine, `local`. See [Locations and SSH](locations.md). |
-
-The name has to be usable as a folder name: letters, digits, `.`, `_` and `-`, starting with a letter or a digit, at most 64 characters.
-The base branch has to be a name that git accepts for a branch.
-Otherwise the command is refused with exit code 2 and nothing is created.
+## Example: what `init` refuses
 
 ```console
 $ octok project init -- -bad
@@ -96,11 +112,7 @@ $ octok project init shop
 error: project `shop` already exists
 ```
 
-An existing name is refused with exit code 5: `init` never overwrites a project.
-The base branch is a default: it is not checked against any remote, because the project has no repository yet.
-`octok repo add` checks it for each repository.
-
-With `--location`, `octok` connects to the machine once to find its home folder, before it creates anything, so a machine that cannot be reached leaves nothing behind:
+## Example: a project on another machine
 
 ```console
 $ octok project init remote --location api-dev-1
@@ -111,9 +123,7 @@ $ octok project use shop
 default project: shop
 ```
 
-### Questions at a terminal
-
-At a terminal, `octok project init` asks for each setting that has no option, and shows the default between brackets:
+## Example: questions at a terminal
 
 ```text
 $ octok project init shop
@@ -126,27 +136,9 @@ created project `shop` (base: staging) at /Users/you/.octotask/projects/shop.yam
 `shop` is now the default project
 ```
 
-Press Enter to keep the default.
-An answer that cannot be used, such as a branch name that git refuses or a machine that cannot be reached, is explained and asked again.
-The list of machines is the `Host` names of `~/.ssh/config`: see [Locations and SSH](locations.md).
-Without a terminal, for example in a script, nothing is asked and the defaults apply.
-Nothing is asked either with `--json`, or when `--base` and `--location` are both given.
+## Example: change the base branch
 
-## `octok project set`
-
-```text
-octok project set [--base <branch>] [--location <location> | --no-location]
-```
-
-Changes the settings of the default project, or of the one named with `-p`.
-At least one option is needed.
-The options can be combined.
-With `--base` and `--location` together, the base branch is changed first: if the location is then refused, the new base branch stays.
-
-`--base <branch>` changes the base branch of the project.
-The repositories that have their own base branch keep it.
-`octok` warns, on stderr, about the repositories whose remote does not have the new branch at the last fetch.
-It uses what is on disk and does not contact the remotes, and the change is made all the same:
+The remote of `shop-frontend` has no `develop`:
 
 ```console
 $ octok project set --base develop
@@ -156,14 +148,7 @@ $ octok project set --base staging
 base of `shop` is now `staging`
 ```
 
-The warning names the repositories that were fetched and whose base branch is not on their remote.
-A repository with its own base branch is checked against that one.
-
-`--location <location>` changes the machine where the repositories of the project live, and `--no-location` goes back to this machine.
-It is refused, with exit code 5, while the project has workspaces, because their checkouts would be left behind: remove them first with [`octok rm`](workspaces.md#delete-a-workspace).
-The clones of the repositories that move are deleted where they were, together with their saved [dev changes](dev.md), and cloned again on the new machine.
-Repositories that have their own location do not move.
-The command prints one line per repository, as [`octok fetch`](sync.md) does, and exits with code 6 if one of them could not be cloned:
+## Example: move the repositories
 
 ```console
 $ octok repo add git@github.com:acme/shop-backend.git
@@ -178,21 +163,7 @@ shop-frontend  fetched
 shop-backend   fetched
 ```
 
-The word `fetched` is printed whether the repository was cloned or fetched; the JSON output tells them apart.
-`--location` and `--no-location` cannot be given together.
-
-## `octok project rm`
-
-```text
-octok project rm <name> [--force]
-```
-
-Deletes a project: its file, the clones of its repositories, its workspaces and the dev changes saved for its repositories.
-It does this on every machine that the project uses, and if the project was the default, there is no default project afterwards.
-When the project was the last one on another machine, the whole `octok` folder of that machine goes too.
-Folders of other projects, and the remotes, are never touched.
-
-`octok project rm` is refused, with exit code 5, while the project has workspaces, because they may hold work that exists nowhere else:
+## Example: delete a project
 
 ```console
 $ octok branch feat/cart
@@ -203,18 +174,11 @@ error: project `shop` still has workspaces: feat-cart
 remove them first with `octok rm <branch>`
 ```
 
-Remove the workspaces first, with [`octok rm`](workspaces.md#delete-a-workspace), which also checks that no work is lost.
-`--force` deletes the workspaces too, and with them the uncommitted changes and the commits that were never pushed.
-
 ```console
 $ octok project rm shop --force
 removed project `shop`
 no default project: choose one with `octok project use <name>`
 ```
-
-Without workspaces, `octok project rm <name>` deletes the project at once, and does not ask for confirmation.
-The clones are deleted before the project file: if that fails, the project is still there and `octok fetch` clones the repositories again.
-A project file that cannot be read, for example one edited by hand with a mistake, is still deleted: only this machine is cleaned then.
 
 ## Related pages
 

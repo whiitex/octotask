@@ -2,16 +2,21 @@
 
 Give each workspace its own containers, its own database and its own ports, when a repository starts its services with Docker Compose.
 
-A backend often has a `compose.yaml` next to its code, for the database and the other services it needs.
-With two workspaces running at the same time, both checkouts would start the same containers on the same ports.
-Docker Compose names a project after its folder, and the checkout of a repository has the same folder name in every workspace, so the second `octok up` would take over the containers of the first.
-[Env values](../commands/up.md#shared-values) give each workspace its own project name and its own ports, written once in the project.
-The examples use the project `shop`, with a backend that runs `uv run main.py` and has a `compose.yaml`, and a frontend that calls it.
+Docker Compose names a project after its folder, and a checkout has the same folder name in every workspace, so a second `octok up` would take over the containers of the first.
+[Env values](../commands/up.md) give each workspace its own project name and its own ports, written once in the project.
 
-## The compose file
+## How to do it
 
-Docker Compose replaces `${NAME}` in `compose.yaml` with the variable of the environment, and reads `COMPOSE_PROJECT_NAME` as the name of the project.
-Write the host ports as variables:
+1. Write the host ports of `compose.yaml` as variables, such as `"${DB_PORT}:5432"`.
+2. Start the services in the run command, before the backend: `docker compose up -d --wait && exec uv run main.py`.
+   `--wait` returns once the health checks pass, and `exec` makes the backend the command that `octok up` follows and stops.
+3. Name the Compose project after the workspace, with the env value `COMPOSE_PROJECT_NAME=backend-{{ workspace.slug }}`: the slug is lowercase, as Compose wants.
+4. Give every other workspace that runs at the same time its own ports, with `--env ... --branch <branch>`.
+5. Stop or remove the containers with `docker compose -p <project>`: they outlive `octok up`, and `octok rm` does not touch them.
+
+## Example: the compose file
+
+Each workspace gets its own containers and volumes, so each branch has a database of its own:
 
 ```yaml
 services:
@@ -26,9 +31,9 @@ services:
       interval: 2s
 ```
 
-Each workspace then gets its own containers and its own volumes, so each branch has a database of its own.
+## Example: the commands and the values
 
-## The commands and the values
+The backend reads `$PORT` and `$DB_PORT`, and the frontend `$VITE_API_URL`, each with the values of its own workspace:
 
 ```console
 $ octok project init shop
@@ -44,16 +49,9 @@ $ octok repo set frontend --run 'npm run dev' --env 'VITE_API_URL=http://localho
 updated `shop-frontend (frontend)` in shop
 ```
 
-- `docker compose up -d --wait` starts the services in the background, and returns once their health checks pass.
-  The backend then starts with its database ready.
-- `exec` makes the backend the command that `octok up` follows and stops.
-- `{{ workspace.slug }}` is the name of the workspace in lowercase, with only letters, digits, `_` and `-`, as Docker Compose wants for a project name.
-- The backend reads `$PORT` and `$DB_PORT`, and the frontend reads `$VITE_API_URL`: each one reads the values of its own workspace.
+## Example: a second workspace beside the first
 
-## A second workspace beside the first
-
-Two workspaces get two project names by themselves, but they would still ask for the same ports.
-Give the second one its own:
+The project names differ by themselves, but the ports must be set:
 
 ```console
 $ octok branch feat/cart
@@ -63,15 +61,12 @@ $ octok repo set backend --env PORT=9009 --env DB_PORT=5433 --branch feat/cart
 updated `shop-backend` in workspace `feat-cart` of shop
 ```
 
-Now `octok up --branch feat/cart` starts the project `backend-feat-cart`, with the database on port 5433 and the backend on 9009, and its frontend calls `http://localhost:9009`.
-Every other workspace keeps 5432 and 9008.
-`docker compose ls` lists the project of each workspace.
+`octok up --branch feat/cart` now starts the project `backend-feat-cart`, with the database on 5433 and the backend on 9009, and its frontend calls `http://localhost:9009`.
+Every other workspace keeps 5432 and 9008, and `docker compose ls` lists the project of each one.
 
-## Stopping and removing the containers
+## Example: stop and remove the containers
 
-The containers run in the background, so they outlive `octok up`: `Ctrl-C` stops the backend, and the database keeps its data for the next run.
-`octok rm` does not touch them either.
-Stop or remove them with Docker Compose, from anywhere:
+`Ctrl-C` stops the backend, and the database keeps running with its data, until you stop it from any folder:
 
 ```sh
 docker compose -p backend-feat-cart stop
@@ -80,10 +75,14 @@ docker compose -p backend-feat-cart down -v
 
 `down -v` deletes the containers and the volumes, with the data of the database of that branch.
 
-## A backend on another machine
+## Example: a backend on another machine
 
 When the backend [lives on another machine](remote-machine.md), its containers run there too, with the same values.
-`localhost` is then the other machine for the backend, but not for a frontend on your laptop: give the frontend the address of the machine, for example with `--env 'VITE_API_URL=http://api-dev-1:{{ repos.backend.env.PORT }}'`.
+`localhost` is then that machine for the backend, but not for a frontend on your laptop, so give the frontend the address of the machine:
+
+```sh
+octok repo set frontend --env 'VITE_API_URL=http://api-dev-1:{{ repos.backend.env.PORT }}'
+```
 
 ## Related pages
 

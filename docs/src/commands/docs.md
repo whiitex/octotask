@@ -2,20 +2,31 @@
 
 How `octok docs` prints the pages of this documentation from the binary you run, and where else the same pages are.
 
-## What it is for
+## How to use it
 
-The documentation of `octok` is a set of pages, one for each subject: a command, a concept, a guide.
-`octok docs` prints them in your terminal, so you and your coding agents can read the pages that describe the version of `octok` you run, with no network.
-It needs no project and no home folder: everything it prints is built into the binary.
+1. List the pages with `octok docs`.
+2. Print one with `octok docs <topic>`, such as `octok docs commands/project`.
 
-```text
-octok docs [<topic>]
-```
+## Options
 
-## The list of topics
+| Command | What it does |
+|---|---|
+| `octok docs` | Lists every page in the order of the site: topic, title and summary, the sentence under the title. |
+| `octok docs <topic>` | Prints that page as Markdown. |
+| `... --json` | Prints the list, or the page with its Markdown, as one document: see [JSON output](../agents/json-output.md). |
 
-A **topic** is the path of a page, without `.md`: `commands/project`, `concepts`, `reference/commands`.
-Without a topic, `octok docs` lists every page, one line each, in the order of the site: the topic, the title and a one-sentence summary.
+## Rules
+
+- **Topics:** a topic is the path of a page without `.md`, such as `concepts` or `reference/commands`.
+- **Built in:** the pages are embedded in the binary, so they match the version you run and need no network, project or home folder.
+- **`reference/commands`** is made from the command line of `octok`, so it always matches `octok --help`.
+- **An unknown topic** exits with code 3 and prints nothing to stdout.
+- **Online:** the site `https://whiitex.github.io/octotask/` has search, and each page as Markdown with `.md` in place of `.html`.
+  For a language model, `llms.txt` lists the pages with their summary, and `llms-full.txt` holds every page in one file, both at the root of the site.
+- **Which to trust:** the site follows the latest release, and `octok docs` the binary you run: when they differ, trust `octok docs`.
+  The [agent skill](../agents/overview.md) points to `octok docs`.
+
+## Example: the list
 
 ```console
 $ octok docs | head -3
@@ -26,11 +37,7 @@ $ octok docs | grep '^commands/docs '
 commands/docs                 Built-in documentation: How `octok docs` prints the pages of this documentation from the binary you run, and where else the same pages are.
 ```
 
-The summary is the sentence under the title of the page.
-
-## One page
-
-With a topic, `octok docs` prints that page as Markdown.
+## Example: one page
 
 ```console
 $ octok docs commands/docs | head -3
@@ -43,12 +50,7 @@ $ octok docs reference/commands | head -3
 Every command of `octok` with its arguments and options, as its `--help` describes them.
 ```
 
-The page is the one of the site for the same version: the files are embedded in the binary when it is built.
-Only `reference/commands` is not a file: it is made from the command line of `octok` itself, so it always matches `octok --help`.
-
-## `--json`
-
-With `--json`, the list is one document with the topics, and a page is one document with its topic, title, summary and the Markdown text:
+## Example: JSON
 
 ```console
 $ octok docs --json | head -c 80
@@ -57,11 +59,7 @@ $ octok docs commands/docs --json | head -c 140
 {"schema":1,"topic":"commands/docs","title":"Built-in documentation","summary":"How `octok docs` prints the pages of this documentation from
 ```
 
-See [JSON output](../agents/json-output.md) for the exact shapes.
-
-## An unknown topic
-
-A topic that is not in the list is refused, and nothing is printed to stdout:
+## Example: an unknown topic
 
 ```console
 $ octok docs commands/nothing
@@ -70,14 +68,8 @@ $ octok docs commands/nothing --json
 {"schema":1,"error":{"code":"topic_not_found","message":"topic `commands/nothing` not found: list the topics with `octok docs`","topic":"commands/nothing"}}
 ```
 
-The exit code is 3, because the topic is something the command names that is not there.
+## Related pages
 
-## The same pages elsewhere
-
-- **The site**, `https://whiitex.github.io/octotask/`, with search and a page for each topic.
-- **Each page as Markdown**, at the address of the page with `.md` in place of `.html`, for example `https://whiitex.github.io/octotask/commands/docs.md`.
-- **`llms.txt`**, at `https://whiitex.github.io/octotask/llms.txt`: the list of the pages with their summary, for a language model.
-- **`llms-full.txt`**, at `https://whiitex.github.io/octotask/llms-full.txt`: every page in one file.
-
-The site is rebuilt at every release, so it follows the latest one, and `octok docs` follows the binary in your hands: when they differ, trust `octok docs`.
-The skill that teaches an agent to drive `octok` points to `octok docs`: see [Driving octok from an agent](../agents/overview.md).
+- [Command reference](../reference/commands.md), the page made from `octok --help`.
+- [Driving octok from an agent](../agents/overview.md).
+- [JSON output](../agents/json-output.md), for the shapes of `--json`.
