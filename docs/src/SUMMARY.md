@@ -17,6 +17,7 @@
 - [Locations and SSH](commands/locations.md)
 - [Syncing](commands/sync.md)
 - [Running](commands/up.md)
+- [Opening in an editor](commands/open.md)
 - [Dev changes](commands/dev.md)
 - [Status](commands/status.md)
 - [Built-in documentation](commands/docs.md)

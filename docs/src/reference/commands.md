@@ -32,6 +32,7 @@ Commands:
 - [`octok checkout`](#octok-checkout): Print the path of the workspace of a branch, creating it when the branch is on a remote
 - [`octok pull`](#octok-pull): Fetch, then fast-forward each worktree of a workspace to its remote branch
 - [`octok up`](#octok-up): Start the repos of a workspace, each with its `run` command, until Ctrl-C
+- [`octok open`](#octok-open): Open each repo of a workspace in a window of an editor, on the machine where it lives
 - [`octok dev`](#octok-dev): Manage the dev changes: what every new workspace gets and no commit contains
 - [`octok pr`](#octok-pr): Work with pull requests
 - [`octok status`](#octok-status): Show the project, its repos and the checkouts of every workspace
@@ -296,6 +297,25 @@ Usage: octok up [OPTIONS] [REPOS]...
 Arguments:
 
 - `[REPOS]...`: Keys or aliases of the repos to start (defaults to every repo with a `run` command)
+
+Options:
+
+- `-b, --branch <BRANCH>`: Branch of the workspace (defaults to the workspace of the current directory)
+
+## `octok open`
+
+Open each repo of a workspace in a window of an editor, on the machine where it lives
+
+A repo on another machine is opened through the editor's Remote-SSH.
+
+```text
+Usage: octok open [OPTIONS] <EDITOR> [REPOS]...
+```
+
+Arguments:
+
+- `<EDITOR>`: Editor to open the repos in
+- `[REPOS]...`: Keys or aliases of the repos to open (defaults to every repo)
 
 Options:
 

@@ -7,7 +7,7 @@ use std::thread;
 use serde::Serialize;
 use serde::ser::{SerializeMap, Serializer};
 
-use super::workspace::{Member, chosen_keys, members_of_existing};
+use super::workspace::{Member, chosen_keys, members_of_existing, only_chosen};
 use crate::adapters::{Commands, Lifeline, Supervised, supervise};
 use crate::{Error, Home, Project, Result};
 
@@ -152,22 +152,11 @@ fn repos_to_run<'a>(
         }
     }
     let mut to_run = Vec::new();
-    for member in members {
+    for member in only_chosen(members, chosen.as_deref()) {
         let Some(run) = project.effective_run(member.key, workspace) else {
             continue;
         };
-        if chosen
-            .as_ref()
-            .is_some_and(|keys| !keys.contains(&member.key))
-        {
-            continue;
-        }
-        if !member.has_worktree()? {
-            return Err(Error::NoWorktree {
-                repo: member.key.to_string(),
-                workspace: workspace.to_string(),
-            });
-        }
+        member.require_worktree(workspace)?;
         let setup = member.repo.setup.as_deref();
         let env = project.resolved_env(member.key, workspace)?;
         to_run.push((member, Commands { run, setup, env }));

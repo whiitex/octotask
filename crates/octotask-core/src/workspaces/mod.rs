@@ -2,12 +2,14 @@
 
 mod cache;
 mod dev;
+mod open;
 mod project;
 mod repos;
 mod up;
 mod workspace;
 
 pub use dev::{DevChanges, dev_changes, save_dev_changes};
+pub use open::{Opened, open_workspace};
 pub use project::{remove_project, set_project_location};
 pub use repos::{
     FetchOutcome, NewRepo, RepoChanges, RepoResult, WorkspaceRepoChanges, check_remote_branch,

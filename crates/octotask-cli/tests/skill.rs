@@ -88,6 +88,7 @@ fn octok_commands(text: &str) -> BTreeSet<Vec<String>> {
             let command = rest.split(COMMAND_END).next().unwrap_or_default();
             let command = command
                 .replace("<number>", "12")
+                .replace("<editor>", "code")
                 .replace(['<', '>', '[', ']'], "");
             shell_words(&command)
         })

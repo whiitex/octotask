@@ -159,6 +159,7 @@ frontend | stopped
 
 The frontend reaches the backend at the address of the VM, not at `localhost`: set the port and host in the run commands or in the [dev changes](../commands/dev.md) of the frontend.
 See [Running](../commands/up.md).
+To edit both repositories, `octok open <editor>` opens the backend on the VM through the Remote-SSH extension: see [Opening in an editor](../commands/open.md).
 
 ## A workspace on one machine
 

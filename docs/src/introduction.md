@@ -80,6 +80,7 @@ Then:
 | Keep repositories on another machine | [Locations and SSH](commands/locations.md), [Repositories on another machine](guides/remote-machine.md) |
 | Update the checkouts | [Syncing](commands/sync.md) |
 | Start every repository of a workspace | [Running](commands/up.md) |
+| Open the repositories of a workspace in your editor | [Opening in an editor](commands/open.md) |
 | Keep local-only changes out of every commit | [Dev changes](commands/dev.md) |
 | See the state of a project | [Status](commands/status.md) |
 | Work through a feature across several repositories | [A feature across several repositories](guides/multi-repo-feature.md) |
