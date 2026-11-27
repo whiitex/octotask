@@ -178,13 +178,13 @@ They are the same with and without `--json`.
 {"schema":1,"removed":"shop","default":null}
 ```
 
-### `octok fetch`, `octok pull`
+### `octok fetch`, `octok pull`, `octok open`
 
 ```json
 {"schema":1,"project":"shop","workspace":"feat-login","repos":[{"key":"shop-frontend","outcome":"updated"},{"key":"shop-backend","error":{"code":"ssh","message":"cannot run commands on `api-dev-1` over ssh","host":"api-dev-1","stderr":""}}]}
 ```
 
-- `workspace` is there for `octok pull` only.
+- `workspace` is there for `octok pull` and `octok open` only.
 - An entry of `repos` has an `outcome` when the repository went well, and an `error` when it failed.
   The `error` is the one described under [Failures](#failures).
 - The command exits with 6 when at least one repository failed.
@@ -199,6 +199,11 @@ They are the same with and without `--json`.
 | `pull` | `diverged` | Skipped: the branch and the remote one both have commits the other lacks. |
 | `pull` | `detached` | Skipped: detached HEAD. |
 | `pull` | `no_worktree` | Skipped: the repository has no checkout in this workspace. |
+| `open` | `{"path":"<folder>"}` | The editor was started: `path` is the folder, written `<host>:<path>` on another machine. |
+
+`octok open` opens nothing and fails as a whole, with no document of `repos`, when the workspace is missing (`workspace_not_found`, exit 3), a chosen repository is not registered (`repo_not_found`, exit 3), a chosen repository has no checkout (`no_worktree`, exit 3), or no workspace can be told from the current folder (`not_in_workspace`, exit 2).
+An editor that is not installed is a `tool_not_found` error of the whole command, with exit 7.
+A machine that does not answer over ssh is an `ssh` error of the whole command, with exit 7, before any window opens.
 
 ### `octok project init`, `octok project set`
 
@@ -209,7 +214,7 @@ They are the same with and without `--json`.
 `file` is the file that holds the settings of the project.
 `octok project init` also makes the project the default one.
 `octok project set --base <branch>` warns on stderr when the remote of a repository lacks that branch.
-`octok project set --location <location>` and `octok project set --no-location` add `repos`: the repositories cloned again where the project now lives, as in [`octok fetch`](#octok-fetch-octok-pull).
+`octok project set --location <location>` and `octok project set --no-location` add `repos`: the repositories cloned again where the project now lives, as in [`octok fetch`](#octok-fetch-octok-pull-octok-open).
 The command then exits with 6 when one of them failed.
 
 ### `octok project use`

@@ -1,7 +1,7 @@
 use std::path::{Component, Path, PathBuf};
 
 use super::repos::dev_store;
-use super::workspace::{chosen_keys, members_of_existing};
+use super::workspace::{chosen_keys, members_of_existing, only_chosen};
 use crate::adapters::{Files, run_script};
 use crate::{Error, Home, Location, Project, Result};
 
@@ -209,21 +209,12 @@ pub fn save_dev_changes(
     let chosen = chosen_keys(project, repos)?;
     let mut not_found: Vec<&str> = files.to_vec();
     let mut saved = Vec::new();
-    for member in members_of_existing(home, project, workspace)? {
-        if chosen
-            .as_ref()
-            .is_some_and(|keys| !keys.contains(&member.key))
-        {
+    let members = members_of_existing(home, project, workspace)?;
+    for member in only_chosen(members, chosen.as_deref()) {
+        if chosen.is_some() {
+            member.require_worktree(workspace)?;
+        } else if !member.has_worktree()? {
             continue;
-        }
-        if !member.has_worktree()? {
-            if chosen.is_none() {
-                continue;
-            }
-            return Err(Error::NoWorktree {
-                repo: member.key.to_string(),
-                workspace: workspace.to_string(),
-            });
         }
         let missing = member.dev.save(&member.worktree, files)?;
         not_found.retain(|file| missing.iter().any(|missing| missing == file));

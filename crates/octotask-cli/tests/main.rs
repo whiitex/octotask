@@ -36,6 +36,8 @@ impl Env {
         install(&bin, "ssh");
         install(&bin, "ssh-add");
         install(&bin, "gh");
+        install_as(&bin, "editor", "code");
+        install_as(&bin, "editor", "cursor");
         env
     }
 
@@ -90,6 +92,14 @@ impl Env {
 
     fn machine_file(&self, name: &str) -> PathBuf {
         self.machine_dir().join(name)
+    }
+
+    /// The calls of the fake editors, each one as the editor and its arguments.
+    fn editor_calls(&self) -> Vec<Vec<String>> {
+        let log = fs::read_to_string(self.machine_file("editor.log")).unwrap_or_default();
+        log.lines()
+            .map(|line| line.split('\t').map(String::from).collect())
+            .collect()
     }
 
     fn remote_dir(&self, name: &str) -> PathBuf {
@@ -156,6 +166,8 @@ impl Env {
             .env("FAKE_SSH_CONFIG", self.machine_file("ssh.config"))
             .env("FAKE_SSH_ADD_LOG", self.machine_file("ssh-add.log"))
             .env("FAKE_GH_DIR", self.machine_file("pull requests"))
+            .env("FAKE_EDITOR_LOG", self.machine_file("editor.log"))
+            .env("FAKE_EDITOR_ENV_LOG", self.machine_file("editor env.log"))
             .args(args);
         cmd
     }
@@ -273,14 +285,19 @@ fn git(dir: &Path, args: &[&str]) -> String {
     String::from_utf8(output.stdout).unwrap().trim().to_string()
 }
 
-/// Links a fake program of the core fixtures into `bin`.
+/// Links the fake program `program` of the core fixtures into `bin`.
+fn install(bin: &Path, program: &str) {
+    install_as(bin, program, program);
+}
+
+/// Links the fake program `fixture` of the core fixtures into `bin` as `name`.
 /// A link and not a copy: Linux refuses to run a file that a process has open for writing
 /// ("Text file busy"), and a test that forks in parallel holds a copy open for a moment.
-fn install(bin: &Path, program: &str) {
+fn install_as(bin: &Path, fixture: &str, name: &str) {
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../octotask-core/tests/fixtures")
-        .join(program);
-    symlink(fixture, bin.join(program)).unwrap();
+        .join(fixture);
+    symlink(fixture, bin.join(name)).unwrap();
 }
 
 /// An empty commit on a new `branch`, made at `date`.
@@ -2735,6 +2752,235 @@ fn the_commands_on_the_other_machine_stop_when_octok_goes_silent() {
     sleeping.assert_stopped_within(Duration::from_secs(40));
     up.signal("-KILL");
     up.finish();
+}
+
+#[test]
+fn open_opens_every_repo_of_the_workspace_in_its_own_window() {
+    let env = env_with_workspace_on_two_machines();
+
+    env.octok(&["open", "code", "--branch", "feat/login"])
+        .assert()
+        .success();
+
+    assert_eq!(
+        env.editor_calls(),
+        [
+            vec!["code".to_string(), local_worktree(&env, "frontend")],
+            vec![
+                "code".into(),
+                "--remote".into(),
+                "ssh-remote+vm".into(),
+                remote_worktree(&env, "backend"),
+            ],
+        ]
+    );
+}
+
+#[test]
+fn open_without_branch_opens_the_workspace_of_the_current_directory() {
+    let env = env_with_workspace_on_two_machines();
+    let subfolder = env.workspace_dir("feat-login").join("frontend/src");
+    fs::create_dir(&subfolder).unwrap();
+
+    env.octok(&["open", "cursor"])
+        .current_dir(subfolder)
+        .assert()
+        .success();
+
+    assert_eq!(env.editor_calls().len(), 2);
+    assert!(env.editor_calls().iter().all(|call| call[0] == "cursor"));
+}
+
+#[test]
+fn open_without_branch_from_the_workspace_folder_opens_every_repo() {
+    let env = env_with_workspace_on_two_machines();
+
+    env.octok(&["open", "code"])
+        .current_dir(env.workspace_dir("feat-login"))
+        .assert()
+        .success();
+
+    assert_eq!(
+        env.editor_calls()
+            .iter()
+            .map(|call| call.last().unwrap().clone())
+            .collect::<Vec<_>>(),
+        [
+            local_worktree(&env, "frontend"),
+            remote_worktree(&env, "backend")
+        ]
+    );
+}
+
+#[test]
+fn open_lets_git_ask_for_credentials_in_the_terminals_of_the_editor() {
+    let env = env_with_workspace_on_two_machines();
+
+    env.octok(&["open", "code", "--branch", "feat/login"])
+        .env_remove("GIT_TERMINAL_PROMPT")
+        .assert()
+        .success();
+
+    let editor_env = fs::read_to_string(env.machine_file("editor env.log")).unwrap();
+    assert_eq!(
+        editor_env,
+        "GIT_TERMINAL_PROMPT unset\nGIT_TERMINAL_PROMPT unset\n"
+    );
+}
+
+#[test]
+fn open_of_some_repos_opens_only_those() {
+    let env = env_with_workspace_on_two_machines();
+
+    env.octok(&["open", "code", "backend", "--branch", "feat/login"])
+        .assert()
+        .success();
+
+    let calls = env.editor_calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].last(), Some(&remote_worktree(&env, "backend")));
+}
+
+#[test]
+fn open_takes_the_branch_as_b() {
+    let env = env_with_workspace_on_two_machines();
+
+    env.octok(&["open", "code", "-b", "feat/login"])
+        .assert()
+        .success();
+
+    assert_eq!(env.editor_calls().len(), 2);
+}
+
+#[test]
+fn open_of_a_repo_without_worktree_opens_nothing() {
+    let env = env_with_workspace_on_two_machines();
+    env.octok(&["repo", "add", &env.remote("agent")])
+        .assert()
+        .success();
+
+    env.octok(&["open", "code", "--branch", "feat/login"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "has no worktree in workspace `feat-login`",
+        ));
+
+    assert!(env.editor_calls().is_empty());
+}
+
+#[test]
+fn open_of_an_unknown_repo_opens_nothing() {
+    let env = env_with_workspace_on_two_machines();
+
+    env.octok(&["open", "code", "nope", "--branch", "feat/login"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("repo `nope` is not registered"));
+
+    assert!(env.editor_calls().is_empty());
+}
+
+#[test]
+fn open_reports_each_repo_and_a_failing_one_does_not_stop_the_others() {
+    let env = env_with_workspace_on_two_machines();
+
+    let out = env
+        .octok(&["open", "code", "--branch", "feat/login"])
+        .env("FAKE_EDITOR_FAIL", "frontend")
+        .output()
+        .unwrap();
+
+    assert_eq!(out.status.code(), Some(6));
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        format!(
+            "frontend  failed\nbackend   opened vm:{}\n",
+            remote_worktree(&env, "backend")
+        )
+    );
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.starts_with("error: frontend: "), "{stderr}");
+    assert!(stderr.contains("cannot open"), "{stderr}");
+    assert_eq!(env.editor_calls().len(), 2);
+}
+
+#[test]
+fn open_with_an_editor_that_is_not_installed_fails_once() {
+    let env = env_with_workspace_on_two_machines();
+    let mut path = OsString::from(env.machine_dir().join("bin"));
+    path.push(":/usr/bin:/bin");
+
+    let out = env
+        .octok(&["open", "windsurf", "--branch", "feat/login"])
+        .env("PATH", path)
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success());
+    assert!(out.stdout.is_empty());
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    let not_found = "`windsurf` not found: install it or add it to PATH";
+    assert_eq!(stderr.matches(not_found).count(), 1, "{stderr}");
+}
+
+#[test]
+fn open_of_an_unknown_editor_lists_the_editors() {
+    let env = Env::new();
+
+    env.octok(&["open", "zed"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "[possible values: code, cursor, windsurf, codium]",
+        ));
+}
+
+#[test]
+fn open_json_reports_the_path_of_each_repo() {
+    let env = env_with_workspace_on_two_machines();
+
+    let report = env.json(&["open", "code", "--branch", "feat/login", "--json"]);
+
+    assert_eq!(report["project"], "deeptree");
+    assert_eq!(report["workspace"], "feat-login");
+    assert_eq!(report["repos"][0]["key"], "frontend");
+    assert_eq!(
+        report["repos"][0]["outcome"]["path"],
+        local_worktree(&env, "frontend")
+    );
+    assert_eq!(report["repos"][1]["key"], "backend");
+    assert_eq!(
+        report["repos"][1]["outcome"]["path"],
+        format!("vm:{}", remote_worktree(&env, "backend"))
+    );
+}
+
+/// The workspace `feat-login` of a frontend on this machine and a backend on `vm`.
+fn env_with_workspace_on_two_machines() -> Env {
+    let env = Env::with_repos(&["frontend"]);
+    env.octok(&["repo", "add", &env.remote("backend"), "--location", "vm"])
+        .assert()
+        .success();
+    env.octok(&["branch", "feat/login"]).assert().success();
+    env
+}
+
+/// The worktree of `repo` in `feat-login` on this machine.
+fn local_worktree(env: &Env, repo: &str) -> String {
+    env.workspace_dir("feat-login")
+        .join(repo)
+        .display()
+        .to_string()
+}
+
+/// The worktree of `repo` in `feat-login` on the other machine.
+fn remote_worktree(env: &Env, repo: &str) -> String {
+    env.machine_root()
+        .join("workspaces/deeptree/feat-login")
+        .join(repo)
+        .display()
+        .to_string()
 }
 
 const APP_PY: &str = "import os\n\n\ndef main():\n    return os.name\n\n\nrun(port=8000)\n";

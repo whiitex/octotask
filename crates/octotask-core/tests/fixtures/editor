@@ -1,0 +1,28 @@
+#!/bin/sh
+# Stands in for an editor of the VS Code family (`code`, `cursor`, ...) in the tests.
+# It logs one line per call to `$FAKE_EDITOR_LOG`: its name, then each argument after a tab.
+# It logs one line per call to `$FAKE_EDITOR_ENV_LOG`: `GIT_TERMINAL_PROMPT=<value>`, or
+# `GIT_TERMINAL_PROMPT unset`.
+# It fails with `cannot open` when an argument contains `$FAKE_EDITOR_FAIL`.
+if [ -n "$FAKE_EDITOR_LOG" ]; then
+    { printf '%s' "$(basename "$0")"; printf '\t%s' "$@"; printf '\n'; } >> "$FAKE_EDITOR_LOG"
+fi
+
+if [ -n "$FAKE_EDITOR_ENV_LOG" ]; then
+    if [ -n "${GIT_TERMINAL_PROMPT+set}" ]; then
+        echo "GIT_TERMINAL_PROMPT=$GIT_TERMINAL_PROMPT" >> "$FAKE_EDITOR_ENV_LOG"
+    else
+        echo "GIT_TERMINAL_PROMPT unset" >> "$FAKE_EDITOR_ENV_LOG"
+    fi
+fi
+
+if [ -n "$FAKE_EDITOR_FAIL" ]; then
+    for argument in "$@"; do
+        case "$argument" in
+            *"$FAKE_EDITOR_FAIL"*)
+                echo "cannot open" >&2
+                exit 1
+                ;;
+        esac
+    done
+fi

@@ -604,11 +604,22 @@ impl Member<'_> {
         Files::new(&self.location).is_dir(&self.worktree)
     }
 
+    /// Fails with `NoWorktree` when the repo has no worktree in `workspace`.
+    pub(super) fn require_worktree(&self, workspace: &str) -> Result<()> {
+        if self.has_worktree()? {
+            return Ok(());
+        }
+        Err(Error::NoWorktree {
+            repo: self.key.to_string(),
+            workspace: workspace.to_string(),
+        })
+    }
+
     fn git(&self) -> Git {
         Git::at(&self.location, &self.worktree)
     }
 
-    fn shown_worktree(&self) -> PathBuf {
+    pub(super) fn shown_worktree(&self) -> PathBuf {
         self.location.shown(&self.worktree)
     }
 }
@@ -638,6 +649,17 @@ pub(super) fn chosen_keys<'a>(
         .map(|name| project.resolve_repo(name))
         .collect();
     keys.map(Some)
+}
+
+/// The members whose key is in `chosen`, as `chosen_keys` gives it: all of them for `None`.
+pub(super) fn only_chosen<'a>(
+    members: Vec<Member<'a>>,
+    chosen: Option<&[&str]>,
+) -> Vec<Member<'a>> {
+    members
+        .into_iter()
+        .filter(|member| chosen.is_none_or(|keys| keys.contains(&member.key)))
+        .collect()
 }
 
 fn members<'a>(home: &Home, project: &'a Project, workspace: &str) -> Vec<Member<'a>> {

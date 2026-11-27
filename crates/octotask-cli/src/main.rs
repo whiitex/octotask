@@ -9,14 +9,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
+use clap::builder::{PossibleValuesParser, TypedValueParser};
 use clap::{ArgGroup, Args, CommandFactory, Parser, Subcommand};
 use octotask_core::{
-    Error, Gh, Home, Location, NewRepo, NewWorkspace, OriginBranches, Project, Registry,
+    Editor, Error, Gh, Home, Location, NewRepo, NewWorkspace, OriginBranches, Project, Registry,
     RepoChanges, Result, Ssh, Stopper, WorkspaceRepoChanges, check_remote_branch,
     checkout_workspace, create_workspace, dev_changes, fetch_repos, locate_workspace,
-    pull_workspace, register_repo, remove_project, remove_workspace, resolve_location,
-    review_workspace, save_dev_changes, set_project_location, start_workspace, status,
-    unregister_repo, update_repo, update_workspace_repo, workspace_name,
+    open_workspace, pull_workspace, register_repo, remove_project, remove_workspace,
+    resolve_location, review_workspace, save_dev_changes, set_project_location, start_workspace,
+    status, unregister_repo, update_repo, update_workspace_repo, workspace_name,
 };
 use serde_json::json;
 use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
@@ -28,8 +29,9 @@ use prompts::{
 };
 use utils::{
     LOCAL, Output, ProjectDocument, RepoDocument, Report, confirm, print_dev_changes,
-    print_fetch_report, print_projects, print_pull_report, print_repos, print_status,
-    print_up_event, print_usage_failure, print_workspace, repo_label, report_exit_code, up_labels,
+    print_fetch_report, print_open_report, print_projects, print_pull_report, print_repos,
+    print_status, print_up_event, print_usage_failure, print_workspace, repo_label,
+    report_exit_code, up_labels,
 };
 
 /// Exit code of a command ended by Ctrl-C, as shells report it.
@@ -117,6 +119,19 @@ enum Command {
     /// without a `run` command is not started.
     Up {
         /// Keys or aliases of the repos to start (defaults to every repo with a `run` command)
+        repos: Vec<String>,
+        /// Branch of the workspace (defaults to the workspace of the current directory)
+        #[arg(short, long)]
+        branch: Option<String>,
+    },
+    /// Open each repo of a workspace in a window of an editor, on the machine where it lives
+    ///
+    /// A repo on another machine is opened through the editor's Remote-SSH.
+    Open {
+        /// Editor to open the repos in
+        #[arg(value_parser = editor_parser())]
+        editor: Editor,
+        /// Keys or aliases of the repos to open (defaults to every repo)
         repos: Vec<String>,
         /// Branch of the workspace (defaults to the workspace of the current directory)
         #[arg(short, long)]
@@ -240,6 +255,12 @@ struct ReviewArgs {
     /// are for are left as they are in git
     #[arg(long)]
     allow_stale_dev: bool,
+}
+
+/// One of the editor names, as `octok open` takes it.
+fn editor_parser() -> impl TypedValueParser<Value = Editor> {
+    let names = Editor::ALL.iter().map(|editor| editor.name());
+    PossibleValuesParser::new(names).map(|name| Editor::named(&name).expect("a listed editor"))
 }
 
 /// `<repo>=<number>`, as `--pr` takes it.
@@ -545,6 +566,20 @@ fn run(cli: Cli, out: Output) -> Result<ExitCode> {
         }
         Command::Up { repos, branch } => {
             return up(&registry, explicit_project, branch.as_deref(), &repos, out);
+        }
+        Command::Open {
+            editor,
+            repos,
+            branch,
+        } => {
+            return open_editor(
+                &registry,
+                explicit_project,
+                branch.as_deref(),
+                editor,
+                &repos,
+                out,
+            );
         }
         Command::Status => {
             let project = registry.load_project(&resolve_project()?)?;
@@ -1011,6 +1046,33 @@ fn up(
     } else {
         ExitCode::FAILURE
     })
+}
+
+fn open_editor(
+    registry: &Registry,
+    explicit_project: Option<&str>,
+    branch: Option<&str>,
+    editor: Editor,
+    repos: &[String],
+    out: Output,
+) -> Result<ExitCode> {
+    let usage = "octok open <editor> --branch <branch>";
+    let (project_name, workspace) = target_workspace(registry, explicit_project, branch, usage)?;
+    let project = registry.load_project(&project_name)?;
+    let repos = open_workspace(
+        registry.home(),
+        &project,
+        &workspace,
+        editor,
+        &as_strs(repos),
+    )?;
+    let report = Report {
+        project: &project.name,
+        workspace: Some(&workspace),
+        repos,
+    };
+    out.result(&report, |report| print_open_report(&project, &report.repos));
+    Ok(report_exit_code(&report.repos))
 }
 
 /// Asks for a stop at Ctrl-C, and when octok is told to end or loses its terminal.

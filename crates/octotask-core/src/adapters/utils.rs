@@ -92,6 +92,18 @@ pub(super) fn run_checked(program: &'static str, place: Place, args: &[&str]) ->
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+/// Runs a local app such as an editor, keeping git's prompts for the terminals it opens.
+pub(super) fn run_app(program: &'static str, args: &[&str]) -> Result<()> {
+    let place = Place::here();
+    let output = app_command(program, args)
+        .output()
+        .map_err(|source| spawn_error(program, place, source))?;
+    if !output.status.success() {
+        return Err(failure(program, place, args, &output));
+    }
+    Ok(())
+}
+
 /// Runs a yes/no query such as `test -d`: exit 0 is `true`, exit 1 is `false`,
 /// anything else is an error.
 pub(super) fn run_query(program: &'static str, place: Place, args: &[&str]) -> Result<bool> {
@@ -190,15 +202,18 @@ fn command(program: &str, place: Place, args: &[&str], ssh_options: &[&str]) -> 
 }
 
 fn local_command(program: &str, dir: Option<&Path>, args: &[&str]) -> Command {
-    let mut command = Command::new(program);
-    command
-        .args(args)
-        .stdin(Stdio::null())
-        // Fail instead of waiting for a password nobody may be there to type. `gh` runs git too.
-        .env("GIT_TERMINAL_PROMPT", "0");
+    let mut command = app_command(program, args);
+    // Fail instead of waiting for a password nobody may be there to type. `gh` runs git too.
+    command.env("GIT_TERMINAL_PROMPT", "0");
     if let Some(dir) = dir {
         command.current_dir(dir);
     }
+    command
+}
+
+fn app_command(program: &str, args: &[&str]) -> Command {
+    let mut command = Command::new(program);
+    command.args(args).stdin(Stdio::null());
     for var in REPO_LOCAL_GIT_VARS {
         command.env_remove(var);
     }

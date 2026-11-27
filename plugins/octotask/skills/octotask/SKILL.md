@@ -34,7 +34,7 @@ For a single repository that is not in a project, use `git` alone.
   Otherwise stdout holds `{"schema":1,"error":{"code":...,"message":...}}`: decide on `error.code`, and show `error.message` to the user when you cannot go on.
 - **A workspace is named after its branch**, with every `/` turned into `-`: the branch `feat/login` lives in the workspace `feat-login`.
   Commands take the branch, never the name of the workspace.
-  `octok branch`, `octok checkout`, `octok pull` and `octok rm` take it as their argument, `octok up` and `octok dev save` as `--branch <branch>`.
+  `octok branch`, `octok checkout`, `octok pull` and `octok rm` take it as their argument, `octok up`, `octok open` and `octok dev save` as `--branch <branch>`.
 - **Look with `octok status --json`.**
   It only reads, while `octok checkout` creates the workspace it is asked about.
 
@@ -166,6 +166,7 @@ These lose work or change what the user set up, so ask first and run them only o
 | `octok project ls --json` | Lists the projects and the default one. |
 | `octok dev show --json` | Shows the dev changes saved for each repository: the local-only edits that every new workspace gets and no commit contains. |
 | `octok up --branch <branch> --json` | Starts every repository of the workspace that has a run command, and stays attached until they end. |
+| `octok open <editor> --branch <branch> --json` | Opens each repository of the workspace in a window of `code`, `cursor`, `windsurf` or `codium`, a remote one through Remote-SSH. Exit 6 when a window failed. |
 | `octok docs <topic>` | Prints a page of the documentation of the installed `octok`. `octok docs` lists the pages. Needs no project. |
 
 A repository is named by its `key` or its `alias` wherever a command takes one.

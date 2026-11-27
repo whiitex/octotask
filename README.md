@@ -50,7 +50,7 @@ workspaces:
 ## Installation
 
 Requires macOS or Linux and `git` 2.37 or newer.
-`gh`, signed in, is needed only for `octok pr review`, and `ssh` only for repositories on another machine.
+`gh`, signed in, is needed only for `octok pr review`, `ssh` only for repositories on another machine, and one of `code`, `cursor`, `windsurf` or `codium` only for `octok open`.
 
 From a release, for example on Apple silicon:
 
@@ -113,6 +113,16 @@ $ octok up
 Every repository with a run command starts in its checkout, after its setup command the first time, the output is shown together with the name in front, and `Ctrl-C` stops them all.
 A value shared between repositories, such as the port of the backend, is written once and read by the others, and a workspace can override it to run beside another one.
 See [Running](https://whiitex.github.io/octotask/commands/up.html).
+
+### Opening the editors
+
+```console
+$ octok open cursor --branch feat/login
+```
+
+Every repository of the workspace opens in its own window of `code`, `cursor`, `windsurf` or `codium`, and one on another machine opens through the Remote-SSH extension of the editor.
+Pass repositories to open only those, and omit `--branch` inside a workspace.
+See [Opening in an editor](https://whiitex.github.io/octotask/commands/open.html).
 
 ### Use with AI agents
 

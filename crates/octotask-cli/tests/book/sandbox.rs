@@ -118,7 +118,7 @@ impl Sandbox {
         fs::write(self.home().join(".gitconfig"), config).unwrap();
     }
 
-    /// `octok`, and fakes of `ssh`, `ssh-add` and `gh` that never reach the network.
+    /// `octok`, and fakes of `ssh`, `ssh-add`, `gh` and the editors that never reach the network.
     fn install_programs(&self) {
         symlink(env!("CARGO_BIN_EXE_octok"), self.bin_dir().join("octok")).unwrap();
         // Links and not copies: Linux refuses to run a file that a process has open for
@@ -127,6 +127,9 @@ impl Sandbox {
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../octotask-core/tests/fixtures");
         for fake in ["ssh", "ssh-add", "gh"] {
             symlink(fixtures.join(fake), self.bin_dir().join(fake)).unwrap();
+        }
+        for editor in ["code", "cursor"] {
+            symlink(fixtures.join("editor"), self.bin_dir().join(editor)).unwrap();
         }
     }
 

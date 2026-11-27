@@ -7,7 +7,7 @@ use std::process::{ExitCode, ExitStatus};
 
 use octotask_core::{
     Checkout, CheckoutOutcome, Commit, DevChanges, Error, ErrorKind, FetchOutcome, NewWorkspace,
-    Project, PullOutcome, Registry, RepoResult, Result, Status, UpEvent, WorkspaceStatus,
+    Opened, Project, PullOutcome, Registry, RepoResult, Result, Status, UpEvent, WorkspaceStatus,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -197,6 +197,10 @@ pub(crate) fn print_repos(out: Output, project: &Project) {
 
 pub(crate) fn print_fetch_report(project: &Project, report: &[RepoResult<FetchOutcome>]) {
     print_report(project, report, |_| "fetched".to_string());
+}
+
+pub(crate) fn print_open_report(project: &Project, report: &[RepoResult<Opened>]) {
+    print_report(project, report, |opened| format!("opened {}", opened.path));
 }
 
 pub(crate) fn print_pull_report(project: &Project, report: &[RepoResult<PullOutcome>]) {

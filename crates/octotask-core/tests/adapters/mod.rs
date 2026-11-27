@@ -1,5 +1,6 @@
 //! Tests for `src/adapters/`, one file per source file, plus the fixtures they share.
 
+mod editor;
 mod gh;
 mod git;
 mod ssh;
